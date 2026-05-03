@@ -2,92 +2,93 @@ import streamlit as st
 from curl_cffi import requests
 import pandas as pd
 import folium
+from folium.plugins import HeatMap
 from streamlit_folium import st_folium, folium_static 
-from geopy.geocoders import Nominatim
-import datetime
-import os
+import numpy as np
 
 # --- 1. KONFIGURACIJA ---
-st.set_page_config(page_title="Wolt Glow Radar v21", layout="wide", page_icon="🕵️")
+st.set_page_config(page_title="Wolt Cloud Radar v22", layout="wide", page_icon="☁️")
 
+# Gradovi
 CITIES = {
-    "Niš": {"coords": (43.3209, 21.8958), "slug": "nis"},
-    "Beograd": {"coords": (44.7866, 20.4489), "slug": "beograd"}
+    "Niš": (43.3209, 21.8958),
+    "Beograd": (44.7866, 20.4489)
 }
 
-# --- 2. FUNKCIJE ---
 @st.cache_data(ttl=60)
-def fetch_wolt_data(lat, lon, city_slug):
+def fetch_wolt_data(lat, lon):
     url = "https://restaurant-api.wolt.com/v1/pages/restaurants"
     try:
         r = requests.get(url, params={"lat": lat, "lon": lon}, impersonate="chrome120", timeout=15)
         if r.status_code == 200:
-            restorani = []
+            res = []
             for section in r.json().get("sections", []):
                 for item in section.get("items", []):
                     v = item.get("venue")
-                    if v:
-                        restorani.append({
-                            "Ime": v.get("name"),
-                            "Lat": float(v.get("location", [0, 0])[1]),
-                            "Lon": float(v.get("location", [0, 0])[0]),
-                            "Online": v.get("online", False)
-                        })
-            return pd.DataFrame(restorani).drop_duplicates(subset=['Ime'])
-    except: pass
-    return pd.DataFrame()
+                    if v and v.get("online"):
+                        res.append([v.get("location")[1], v.get("location")[0]])
+            return res
+    except: return []
 
-# --- 3. LOGIKA ZA MAPE ---
-st.title("🕵️ Wolt Market Intelligence - Glow Radar")
+st.title("☁️ Wolt Service Cloud - Analiza pokrivenosti")
 
-grad_naziv = st.sidebar.selectbox("Grad:", list(CITIES.keys()))
-if 'lat' not in st.session_state:
-    st.session_state.lat, st.session_state.lon = CITIES[grad_naziv]["coords"]
+grad = st.sidebar.selectbox("Izaberi grad:", list(CITIES.keys()))
+center = CITIES[grad]
 
-tab1, tab2 = st.tabs(["🟢 Operativni Radar", "🎯 Logistički Glow (Efikasnost)"])
+# POVLAČENJE PODATAKA
+restorani_koordinate = fetch_wolt_data(center[0], center[1])
 
-df = fetch_wolt_data(st.session_state.lat, st.session_state.lon, CITIES[grad_naziv]["slug"])
-
-# --- TAB 1: KLASIČNI RADAR ---
-with tab1:
-    m1 = folium.Map(location=[st.session_state.lat, st.session_state.lon], zoom_start=14)
-    if not df.empty:
-        for _, r in df.iterrows():
-            boja = "green" if r['Online'] else "red"
-            folium.CircleMarker([r['Lat'], r['Lon']], radius=6, color=boja, fill=True).add_to(m1)
-    st_folium(m1, width="100%", height=500, key="radar_classic")
-
-# --- TAB 2: LOGISTIČKI GLOW (Tvoja nova vizuelna logika) ---
-with tab2:
-    st.subheader("Vizuelizacija zone pokrivenosti")
-    m2 = folium.Map(location=[st.session_state.lat, st.session_state.lon], zoom_start=13, tiles="cartodbpositron")
-
-    if not df.empty:
-        df_active = df[df['Online'] == True]
+if restorani_koordinate:
+    # --- MOZAK OPERACIJE: GENERISANJE "OBLAKA" ---
+    # Za svaki restoran pravimo sistem tačaka koji simulira tvoje krugove
+    heat_points = []
+    
+    for lat, lon in restorani_koordinate:
+        # 1. Centar (Zelena zona - najjači intenzitet)
+        heat_points.append([lat, lon, 1.0])
         
-        # DEFINICIJA ZONA (Redosled je bitan: prvo najveći krugovi, na kraju najmanji)
-        # Smanjujemo fill_opacity kako krug raste da bismo izbegli "mrlju"
-        zones = [
-            {"r": 3000, "c": "#641E16", "op": 0.01}, # Bordo (najprozirniji)
-            {"r": 2500, "c": "#922B21", "op": 0.015},
-            {"r": 2000, "c": "#C0392B", "op": 0.02},
-            {"r": 1500, "c": "#E67E22", "op": 0.03},
-            {"r": 1000, "c": "#F1C40F", "op": 0.04},
-            {"r": 500,  "c": "#27AE60", "op": 0.06}, # Zeleni (najjači)
-        ]
+        # 2. Simuliramo širenje (dodajemo virtuelne tačke oko restorana)
+        # Ovo pravi "mekan" prelaz umesto oštrih krugova koji prave haos
+        for angle in range(0, 360, 45): # Na svakih 45 stepeni
+            rad = np.radians(angle)
+            # Tačke na 800m (Žuta zona)
+            heat_points.append([lat + 0.007 * np.cos(rad), lon + 0.009 * np.sin(rad), 0.6])
+            # Tačke na 2km (Crvena zona - najslabiji intenzitet)
+            heat_points.append([lat + 0.018 * np.cos(rad), lon + 0.022 * np.sin(rad), 0.2])
 
-        for _, r in df_active.iterrows():
-            for zone in zones:
-                folium.Circle(
-                    location=[r['Lat'], r['Lon']],
-                    radius=zone['r'],
-                    color=zone['c'],
-                    stroke=False,      # KLJUČNO: Brišemo ivice krugova!
-                    fill=True,
-                    fill_color=zone['c'],
-                    fill_opacity=zone['op'],
-                    interactive=False
-                ).add_to(m2)
+    # KREIRANJE MAPE
+    # Koristimo "CartoDB Positron" jer je bela i čista podloga
+    m = folium.Map(location=center, zoom_start=13, tiles="cartodbpositron")
 
-    folium_static(m2, width=1200)
-    st.markdown("💡 **Legenda:** Jaka zelena boja = epicentar ponude. Tamno crvene blede zone = rubovi dostave.")
+    # CUSTOM GRADIENT: Tvoja logika boja
+    # 0.2 (daleko) = Crveno, 0.5 (srednje) = Žuto/Narandžasto, 1.0 (blizu) = Zeleno
+    gradient_config = {
+        0.2: 'red',
+        0.4: 'orange',
+        0.6: 'yellow',
+        1.0: 'green'
+    }
+
+    HeatMap(
+        heat_points, 
+        radius=40, 
+        blur=25, 
+        gradient=gradient_config,
+        min_opacity=0.2
+    ).add_to(m)
+
+    # Dodajemo male tačkice gde su zapravo restorani da se lakše snađeš
+    for lat, lon in restorani_koordinate:
+        folium.CircleMarker([lat, lon], radius=2, color='black', fill=True, opacity=0.3).add_to(m)
+
+    folium_static(m, width=1200)
+
+    st.markdown("""
+    ### 📖 Kako čitati ovu mapu:
+    - **Jaka Zelena:** Ovde si "kralj". Imaš gomilu restorana koji su ti pod nosom.
+    - **Žuta/Narandžasta:** Dobra pokrivenost, ali restorani su na 1-1.5km.
+    - **Crvena/Bleda:** Rubne zone. Ovde hrana putuje najduže i izbor je najslabiji.
+    - **Belo:** Pustinja. Srećno sa poručivanjem.
+    """)
+else:
+    st.error("Nema otvorenih restorana ili je API blokiran.")
