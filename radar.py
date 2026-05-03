@@ -11,7 +11,7 @@ import datetime
 import os
 
 # --- 1. KONFIGURACIJA ---
-st.set_page_config(page_title="Wolt BI Radar v23.2", layout="wide", page_icon="📡")
+st.set_page_config(page_title="Wolt BI Radar v23.3", layout="wide", page_icon="📡")
 
 CITIES = {
     "Niš": {"coords": (43.3209, 21.8958), "slug": "nis"},
@@ -21,7 +21,7 @@ CITIES = {
 }
 
 DB_FILE = "radar_history.csv"
-geolocator = Nominatim(user_agent="wolt_radar_final_fix")
+geolocator = Nominatim(user_agent="wolt_radar_big_screen")
 
 # --- 2. SESSION STATE ---
 if 'lat' not in st.session_state:
@@ -86,14 +86,14 @@ interval = st.sidebar.number_input("Auto-refresh (min):", 1, 60, 5)
 if st.sidebar.button("▶️ START"): st.session_state.timer_active = True
 if st.sidebar.button("⏹️ STOP"): st.session_state.timer_active = False
 if st.session_state.timer_active:
-    st_autorefresh(interval=interval*60000, key="refresh_v23")
+    st_autorefresh(interval=interval*60000, key="refresh_v23_3")
 
 # --- 5. GLAVNI PANEL ---
-tab1, tab2, tab3 = st.tabs(["🟢 Otvoreno / Zatvoreno", "📈 Traffic Tracker", "☁️ Service Cloud"])
+tab1, tab2, tab3 = st.tabs(["🟢 Otvoreno / Zatvoreno", "📈 Traffic Tracker", "☁️ Service Cloud (BIG)"])
 
 df_main = fetch_wolt_data(st.session_state.lat, st.session_state.lon, CITIES[grad_naziv]["slug"])
 
-# TAB 1: RADAR MAPA
+# --- TAB 1: RADAR MAPA ---
 with tab1:
     if not df_main.empty:
         c1, c2, c3 = st.columns(3)
@@ -106,25 +106,23 @@ with tab1:
             boja = "green" if r['Online'] else "red"
             folium.CircleMarker([r['Lat'], r['Lon']], radius=7, color=boja, fill=True, tooltip=r['Ime']).add_to(m1)
         
-        st_folium(m1, width="100%", height=500, key="map_v23_2")
+        # Malo veća mapa i ovde (600px)
+        st_folium(m1, width="100%", height=600, key="map_v23_3_main")
         st.dataframe(df_main[["Ime", "Status", "Ocena", "Wolt Link"]], use_container_width=True, hide_index=True)
 
-# TAB 2: TRAFFIC TRACKER (FIXED)
+# --- TAB 2: TRAFFIC TRACKER ---
 with tab2:
     st.title("📈 Procena prodaje")
     if os.path.exists(DB_FILE):
         h = pd.read_csv(DB_FILE)
-        # Čišćenje: pretvaramo u vreme i IZBACUJEMO NaT (greške)
         h['timestamp'] = pd.to_datetime(h['timestamp'], errors='coerce')
         h = h.dropna(subset=['timestamp'])
-        
         ts = sorted(h['timestamp'].unique())
         
         if len(ts) >= 2:
             t_now, t_pre = ts[-1], ts[-2]
             df_now = h[h['timestamp'] == t_now].copy()
             df_pre = h[h['timestamp'] == t_pre].copy()
-            
             df_now['Broj_Ocena'] = pd.to_numeric(df_now['Broj_Ocena'], errors='coerce').fillna(0)
             df_pre['Broj_Ocena'] = pd.to_numeric(df_pre['Broj_Ocena'], errors='coerce').fillna(0)
             
@@ -132,16 +130,18 @@ with tab2:
             m['Nove_Ocene'] = m['Broj_Ocena_sad'] - m['Broj_Ocena_pre']
             m['Procena_Porudžbina'] = m['Nove_Ocene'] * 10
             
-            # Bezbedno formatiranje vremena
             st.subheader(f"Analiza: {t_pre.strftime('%H:%M')} -> {t_now.strftime('%H:%M')}")
             res = m[m['Nove_Ocene'] > 0].sort_values(by='Nove_Ocene', ascending=False)
             st.dataframe(res[["Ime", "Nove_Ocene", "Procena_Porudžbina"]], use_container_width=True, hide_index=True)
-        else: st.warning("Potrebno je više snimaka u bazi.")
+        else: st.warning("Potrebna su bar 2 snimka za poređenje.")
     else: st.info("Baza je prazna.")
 
-# TAB 3: SERVICE CLOUD (HEATMAP)
+# --- TAB 3: SERVICE CLOUD (BIG & IMMERSIVE) ---
 with tab3:
-    st.title("☁️ Mapa efikasnosti")
+    st.title("☁️ Service Cloud: Vizuelna pokrivenost")
+    st.write("Mapa je proširena za bolju BI analitiku.")
+    
+    # Koristimo svetliju podlogu da podaci više dođu do izražaja
     m_cloud = folium.Map(location=[st.session_state.lat, st.session_state.lon], zoom_start=13, tiles="cartodbpositron")
     
     if not df_main.empty:
@@ -152,10 +152,16 @@ with tab3:
             heat_points.append([lat, lon, 1.0])
             for angle in range(0, 360, 45):
                 rad = np.radians(angle)
-                heat_points.append([lat + 0.007 * np.cos(rad), lon + 0.009 * np.sin(rad), 0.6])
-                heat_points.append([lat + 0.018 * np.cos(rad), lon + 0.022 * np.sin(rad), 0.2])
+                heat_points.append([lat + 0.007 * np.cos(rad), lon + 0.009 * np.sin(rad), 0.6]) # ~800m
+                heat_points.append([lat + 0.018 * np.cos(rad), lon + 0.022 * np.sin(rad), 0.2]) # ~2km
         
         if heat_points:
-            HeatMap(heat_points, radius=40, blur=25, gradient={0.2: 'red', 0.5: 'yellow', 1.0: 'green'}, min_opacity=0.2).add_to(m_cloud)
+            HeatMap(heat_points, 
+                    radius=45, # Malo veći radijus za "mekši" cloud
+                    blur=30, 
+                    gradient={0.2: 'red', 0.5: 'yellow', 1.0: 'green'}, 
+                    min_opacity=0.2).add_to(m_cloud)
         
-        folium_static(m_cloud, width=1200)
+    # POVEĆANJE MAPE: Povećana i širina i visina na 800px
+    # Koristimo folium_static jer je on stabilniji za fiksne velike dimenzije u tabovima
+    folium_static(m_cloud, width=1400, height=800)
