@@ -3,7 +3,6 @@ from curl_cffi import requests
 import pandas as pd
 import folium
 from folium.plugins import HeatMap
-# Dodajemo folium_static za maksimalnu kompatibilnost u tabovima
 from streamlit_folium import st_folium, folium_static 
 from geopy.geocoders import Nominatim
 from streamlit_autorefresh import st_autorefresh
@@ -11,7 +10,7 @@ import datetime
 import os
 
 # --- 1. KONFIGURACIJA ---
-st.set_page_config(page_title="Wolt BI Radar v16.3", layout="wide", page_icon="🕵️")
+st.set_page_config(page_title="Wolt Market Radar v17", layout="wide", page_icon="🕵️")
 
 CITIES = {
     "Niš": {"coords": (43.3209, 21.8958), "slug": "nis"},
@@ -20,6 +19,7 @@ CITIES = {
 }
 
 DB_FILE = "radar_history.csv"
+geolocator = Nominatim(user_agent="wolt_radar_v17")
 
 # --- 2. SESSION STATE ---
 if 'lat' not in st.session_state:
@@ -29,7 +29,7 @@ if 'current_city' not in st.session_state:
 if 'timer_active' not in st.session_state:
     st.session_state.timer_active = False
 
-# --- 3. FUNKCIJA ZA PODATKE ---
+# --- 3. FUNKCIJE ---
 @st.cache_data(ttl=60)
 def fetch_wolt_data(lat, lon, city_slug):
     url = "https://restaurant-api.wolt.com/v1/pages/restaurants"
@@ -43,8 +43,7 @@ def fetch_wolt_data(lat, lon, city_slug):
                 for item in section.get("items", []):
                     v = item.get("venue")
                     if v:
-                        rating_data = v.get("rating", {})
-                        # Čistimo ETA - uzimamo broj
+                        # Čišćenje ETA (vreme dostave)
                         eta_raw = v.get("estimate", 30)
                         try:
                             eta = int(str(eta_raw).split('-')[0])
@@ -58,8 +57,8 @@ def fetch_wolt_data(lat, lon, city_slug):
                             "Lon": float(v.get("location", [0, 0])[0]),
                             "Status": "Otvoreno 🟢" if v.get("online") else "Zatvoreno 🔴",
                             "Online": v.get("online", False),
-                            "Ocena": rating_data.get("score", 0),
-                            "Broj_Ocena": rating_data.get("volume", 0),
+                            "Ocena": v.get("rating", {}).get("score", 0),
+                            "Broj_Ocena": v.get("rating", {}).get("volume", 0),
                             "ETA": eta,
                             "Wolt Link": f"https://wolt.com/sr/srb/{city_slug}/restaurant/{v.get('slug')}"
                         })
@@ -68,8 +67,8 @@ def fetch_wolt_data(lat, lon, city_slug):
     return pd.DataFrame()
 
 # --- 4. SIDEBAR ---
-st.sidebar.title("🛠️ Kontrola")
-grad_naziv = st.sidebar.selectbox("Grad:", list(CITIES.keys()))
+st.sidebar.title("🛠️ Kontrole")
+grad_naziv = st.sidebar.selectbox("Izaberi grad:", list(CITIES.keys()))
 
 if grad_naziv != st.session_state.current_city:
     st.session_state.current_city = grad_naziv
@@ -77,75 +76,101 @@ if grad_naziv != st.session_state.current_city:
     st.cache_data.clear()
     st.rerun()
 
-st.sidebar.markdown("---")
-if st.sidebar.button("💾 SNIMI STANJE"):
-    df_snimak = fetch_wolt_data(st.session_state.lat, st.session_state.lon, CITIES[grad_naziv]["slug"])
-    if not df_snimak.empty:
-        df_snimak['timestamp'] = datetime.datetime.now()
-        df_snimak.to_csv(DB_FILE, mode='a', header=not os.path.exists(DB_FILE), index=False)
-        st.sidebar.success("Arhivirano!")
+adresa_input = st.sidebar.text_input("📍 Pretraga adrese:", placeholder="npr. Knjaževačka 147")
+if st.sidebar.button("🔍 Osveži lokaciju"):
+    try:
+        loc = geolocator.geocode(f"{adresa_input}, {grad_naziv}, Serbia")
+        if loc:
+            st.session_state.lat, st.session_state.lon = loc.latitude, loc.longitude
+            st.cache_data.clear()
+            st.rerun()
+    except: st.sidebar.error("Nije nađeno.")
 
-# --- 5. GLAVNI PANEL ---
-tab1, tab2, tab3 = st.tabs(["🗺️ Radar Mapa", "📈 Traffic Tracker", "🔥 Dostava HeatMap"])
+st.sidebar.markdown("---")
+if st.sidebar.button("💾 SNIMI ZA TRAFFIC"):
+    df_s = fetch_wolt_data(st.session_state.lat, st.session_state.lon, CITIES[grad_naziv]["slug"])
+    if not df_s.empty:
+        df_s['timestamp'] = datetime.datetime.now()
+        df_s.to_csv(DB_FILE, mode='a', header=not os.path.exists(DB_FILE), index=False)
+        st.sidebar.success("Podaci arhivirani!")
+
+st.sidebar.markdown("---")
+interval = st.sidebar.number_input("Auto-refresh (min):", 1, 60, 5)
+if st.sidebar.button("▶️ START"): st.session_state.timer_active = True
+if st.sidebar.button("⏹️ STOP"): st.session_state.timer_active = False
+
+if st.session_state.timer_active:
+    st_autorefresh(interval=interval*60000, key="global_r")
+
+# --- 5. GLAVNI PANEL (TABOVI) ---
+tab1, tab2, tab3 = st.tabs(["🟢 Otvoreno / Zatvoreno", "📈 Traffic Tracker", "🔥 Heatmap Kašnjenja"])
 
 df_main = fetch_wolt_data(st.session_state.lat, st.session_state.lon, CITIES[grad_naziv]["slug"])
 
-# TAB 1: OPERATIVNA MAPA (v13 stil)
+# --- TAB 1: OTVORENO / ZATVORENO (Vraćena stara logika) ---
 with tab1:
-    st.title(f"📍 Radar: {grad_naziv}")
+    st.title(f"📊 Pregled tržišta: {grad_naziv}")
+    
     if not df_main.empty:
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Ukupno", len(df_main))
+        c2.metric("Otvoreno", len(df_main[df_main['Online'] == True]))
+        c3.metric("Zatvoreno", len(df_main[df_main['Online'] == False]))
+        
+        st.markdown("### 🗺️ Interaktivna mapa")
         m1 = folium.Map(location=[st.session_state.lat, st.session_state.lon], zoom_start=14)
         folium.Marker([st.session_state.lat, st.session_state.lon], icon=folium.Icon(color='blue', icon='home')).add_to(m1)
+        
         for _, r in df_main.iterrows():
             boja = "green" if r['Online'] else "red"
             folium.CircleMarker([r['Lat'], r['Lon']], radius=8, color=boja, fill=True, tooltip=r['Ime']).add_to(m1)
         
-        # Ovde koristimo st_folium jer nam treba interakcija (klik)
-        map_resp = st_folium(m1, width="100%", height=500, key="radar_map")
-        
-        if map_resp and map_resp.get("last_clicked"):
-            st.session_state.lat = map_resp["last_clicked"]["lat"]
-            st.session_state.lon = map_resp["last_clicked"]["lng"]
+        resp = st_folium(m1, width="100%", height=500, key="main_map")
+        if resp and resp.get("last_clicked"):
+            st.session_state.lat = resp["last_clicked"]["lat"]
+            st.session_state.lon = resp["last_clicked"]["lng"]
             st.cache_data.clear()
             st.rerun()
-            
-        st.dataframe(df_main[["Ime", "Status", "Ocena", "ETA", "Wolt Link"]], use_container_width=True, hide_index=True)
 
-# TAB 2: TRAFFIC
+        st.markdown("### 📋 Tabela restorana")
+        st.dataframe(df_main[["Ime", "Status", "Ocena", "ETA", "Adresa", "Wolt Link"]], 
+                     use_container_width=True, hide_index=True,
+                     column_config={"Wolt Link": st.column_config.LinkColumn("Link", display_text="Otvori 🔗")})
+
+# --- TAB 2: TRAFFIC TRACKER ---
 with tab2:
-    st.title("📈 Analiza rasta ocena")
+    st.title("📈 Traffic Tracker (Rast ocena)")
     if os.path.exists(DB_FILE):
         h = pd.read_csv(DB_FILE)
-        st.write("Podaci su dostupni u bazi. Uporedi poslednja dva snimka.")
-        # Ovde ide tvoja logika za traffic...
+        h['timestamp'] = pd.to_datetime(h['timestamp'])
+        ts = sorted(h['timestamp'].unique())
+        if len(ts) >= 2:
+            df_now = h[h['timestamp'] == ts[-1]]
+            df_pre = h[h['timestamp'] == ts[-2]]
+            m = pd.merge(df_now, df_pre, on="Ime", suffixes=('_sad', '_pre'))
+            m['Nove_Ocene'] = m['Broj_Ocena_sad'] - m['Broj_Ocena_pre']
+            m['Procena_Porudžbina'] = m['Nove_Ocene'] * 10
+            st.dataframe(m[m['Nove_Ocene'] > 0].sort_values(by='Nove_Ocene', ascending=False)[["Ime", "Nove_Ocene", "Procena_Porudžbina"]], use_container_width=True)
+        else: st.warning("Snimi podatke bar dva puta.")
     else: st.info("Baza je prazna.")
 
-# TAB 3: HEATMAP (FIXED)
+# --- TAB 3: HEATMAP (Poboljšana logika) ---
 with tab3:
-    st.title("🔥 Mapa kašnjenja i gužve")
+    st.title("🔥 Geografija kašnjenja")
+    st.write("Analiza brzine dostave samo za OTVORENE restorane.")
     
-    # Kreiramo mapu
     m3 = folium.Map(location=[st.session_state.lat, st.session_state.lon], zoom_start=14)
     
     if not df_main.empty:
-        # Uzimamo samo otvorene
         df_active = df_main[df_main['Online'] == True].copy()
-        
         if not df_active.empty:
-            # Priprema podataka
+            # Smanjujemo radijus (radius=20) da tačke ne bi "gutale" jedna drugu u centru
+            # Weight je ETA
             h_data = df_active[['Lat', 'Lon', 'ETA']].dropna().values.tolist()
-            # Dodajemo HeatMap
-            HeatMap(h_data, radius=30, blur=15, min_opacity=0.5).add_to(m3)
-            st.success(f"Analizirano {len(df_active)} otvorenih restorana.")
+            HeatMap(h_data, radius=20, blur=15, min_opacity=0.3).add_to(m3)
+            st.success(f"Prikazujem podatke za {len(df_active)} otvorenih lokacija.")
         else:
-            st.warning("Nema otvorenih restorana trenutno.")
-    
-    # REŠENJE: folium_static umesto st_folium za Tab 3
-    # Ovo prisiljava Streamlit da iscrta mapu odmah, bez obzira na tabove
+            st.warning("Trenutno nema otvorenih restorana.")
+            
     folium_static(m3, width=1200)
-
-    st.markdown("""
-    ---
-    - 🔴 **Vrele tačke:** Visok ETA (gužva).
-    - 🔵 **Hladne tačke:** Brza dostava.
-    """)
+    st.write("🔴 **Crveno** = Duže čekanje (visok ETA) | 🔵 **Plavo/Zeleno** = Brza dostava.")
