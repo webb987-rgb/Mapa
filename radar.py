@@ -11,7 +11,7 @@ import datetime
 import os
 
 # --- 1. KONFIGURACIJA ---
-st.set_page_config(page_title="Wolt Ultimate Radar v23.1", layout="wide", page_icon="📡")
+st.set_page_config(page_title="Wolt BI Radar v23.2", layout="wide", page_icon="📡")
 
 CITIES = {
     "Niš": {"coords": (43.3209, 21.8958), "slug": "nis"},
@@ -21,7 +21,7 @@ CITIES = {
 }
 
 DB_FILE = "radar_history.csv"
-geolocator = Nominatim(user_agent="wolt_radar_v23_1")
+geolocator = Nominatim(user_agent="wolt_radar_final_fix")
 
 # --- 2. SESSION STATE ---
 if 'lat' not in st.session_state:
@@ -51,6 +51,7 @@ def fetch_wolt_data(lat, lon, city_slug):
                             "Online": v.get("online", False),
                             "Ocena": v.get("rating", {}).get("score", 0),
                             "Broj_Ocena": int(v.get("rating", {}).get("volume", 0)),
+                            "ETA": v.get("estimate", 30),
                             "Wolt Link": f"https://wolt.com/sr/srb/{city_slug}/restaurant/{v.get('slug')}"
                         })
             return pd.DataFrame(restorani).drop_duplicates(subset=['Ime'])
@@ -60,9 +61,7 @@ def fetch_wolt_data(lat, lon, city_slug):
 def save_snapshot(df):
     if not df.empty:
         df_save = df.copy()
-        df_save['timestamp'] = datetime.datetime.now()
-        # Osiguravamo da je Broj_Ocena uvek broj pre čuvanja
-        df_save['Broj_Ocena'] = pd.to_numeric(df_save['Broj_Ocena'], errors='coerce').fillna(0)
+        df_save['timestamp'] = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         if not os.path.isfile(DB_FILE):
             df_save.to_csv(DB_FILE, index=False)
         else:
@@ -79,15 +78,15 @@ if grad_naziv != st.session_state.current_city:
     st.rerun()
 
 if st.sidebar.button("💾 SNIMI ZA ANALIZU"):
-    df_cur = fetch_wolt_data(st.session_state.lat, st.session_state.lon, CITIES[grad_naziv]["slug"])
-    save_snapshot(df_cur)
-    st.sidebar.success("Snimljeno!")
+    curr = fetch_wolt_data(st.session_state.lat, st.session_state.lon, CITIES[grad_naziv]["slug"])
+    save_snapshot(curr)
+    st.sidebar.success("Podaci arhivirani!")
 
 interval = st.sidebar.number_input("Auto-refresh (min):", 1, 60, 5)
 if st.sidebar.button("▶️ START"): st.session_state.timer_active = True
 if st.sidebar.button("⏹️ STOP"): st.session_state.timer_active = False
 if st.session_state.timer_active:
-    st_autorefresh(interval=interval*60000, key="r_v23_1")
+    st_autorefresh(interval=interval*60000, key="refresh_v23")
 
 # --- 5. GLAVNI PANEL ---
 tab1, tab2, tab3 = st.tabs(["🟢 Otvoreno / Zatvoreno", "📈 Traffic Tracker", "☁️ Service Cloud"])
@@ -101,21 +100,24 @@ with tab1:
         c1.metric("Ukupno", len(df_main))
         c2.metric("Otvoreno 🟢", len(df_main[df_main['Online'] == True]))
         c3.metric("Zatvoreno 🔴", len(df_main[df_main['Online'] == False]))
-
+        
         m1 = folium.Map(location=[st.session_state.lat, st.session_state.lon], zoom_start=14)
         for _, r in df_main.iterrows():
             boja = "green" if r['Online'] else "red"
             folium.CircleMarker([r['Lat'], r['Lon']], radius=7, color=boja, fill=True, tooltip=r['Ime']).add_to(m1)
         
-        st_folium(m1, width="100%", height=500, key="main_radar_v23")
+        st_folium(m1, width="100%", height=500, key="map_v23_2")
         st.dataframe(df_main[["Ime", "Status", "Ocena", "Wolt Link"]], use_container_width=True, hide_index=True)
 
-# TAB 2: TRAFFIC TRACKER (OVDE JE BIO BAG)
+# TAB 2: TRAFFIC TRACKER (FIXED)
 with tab2:
     st.title("📈 Procena prodaje")
     if os.path.exists(DB_FILE):
         h = pd.read_csv(DB_FILE)
-        h['timestamp'] = pd.to_datetime(h['timestamp'])
+        # Čišćenje: pretvaramo u vreme i IZBACUJEMO NaT (greške)
+        h['timestamp'] = pd.to_datetime(h['timestamp'], errors='coerce')
+        h = h.dropna(subset=['timestamp'])
+        
         ts = sorted(h['timestamp'].unique())
         
         if len(ts) >= 2:
@@ -123,23 +125,21 @@ with tab2:
             df_now = h[h['timestamp'] == t_now].copy()
             df_pre = h[h['timestamp'] == t_pre].copy()
             
-            # POPRAVKA: Pretvaramo u brojeve pre spajanja i oduzimanja
             df_now['Broj_Ocena'] = pd.to_numeric(df_now['Broj_Ocena'], errors='coerce').fillna(0)
             df_pre['Broj_Ocena'] = pd.to_numeric(df_pre['Broj_Ocena'], errors='coerce').fillna(0)
             
             m = pd.merge(df_now, df_pre, on="Ime", suffixes=('_sad', '_pre'))
-            
-            # Sada je oduzimanje sigurno
             m['Nove_Ocene'] = m['Broj_Ocena_sad'] - m['Broj_Ocena_pre']
             m['Procena_Porudžbina'] = m['Nove_Ocene'] * 10
             
-            st.write(f"Analiza rasta: {t_pre.strftime('%H:%M')} -> {t_now.strftime('%H:%M')}")
+            # Bezbedno formatiranje vremena
+            st.subheader(f"Analiza: {t_pre.strftime('%H:%M')} -> {t_now.strftime('%H:%M')}")
             res = m[m['Nove_Ocene'] > 0].sort_values(by='Nove_Ocene', ascending=False)
             st.dataframe(res[["Ime", "Nove_Ocene", "Procena_Porudžbina"]], use_container_width=True, hide_index=True)
-        else: st.warning("Snimi podatke bar još jednom (potrebna su 2 snimka).")
+        else: st.warning("Potrebno je više snimaka u bazi.")
     else: st.info("Baza je prazna.")
 
-# TAB 3: SERVICE CLOUD
+# TAB 3: SERVICE CLOUD (HEATMAP)
 with tab3:
     st.title("☁️ Mapa efikasnosti")
     m_cloud = folium.Map(location=[st.session_state.lat, st.session_state.lon], zoom_start=13, tiles="cartodbpositron")
@@ -155,5 +155,7 @@ with tab3:
                 heat_points.append([lat + 0.007 * np.cos(rad), lon + 0.009 * np.sin(rad), 0.6])
                 heat_points.append([lat + 0.018 * np.cos(rad), lon + 0.022 * np.sin(rad), 0.2])
         
-        HeatMap(heat_points, radius=40, blur=25, gradient={0.2: 'red', 0.5: 'yellow', 1.0: 'green'}, min_opacity=0.2).add_to(m_cloud)
+        if heat_points:
+            HeatMap(heat_points, radius=40, blur=25, gradient={0.2: 'red', 0.5: 'yellow', 1.0: 'green'}, min_opacity=0.2).add_to(m_cloud)
+        
         folium_static(m_cloud, width=1200)
