@@ -8,9 +8,8 @@ from streamlit_autorefresh import st_autorefresh
 import datetime
 
 # --- KONFIGURACIJA ---
-st.set_page_config(page_title="Wolt Market Radar", layout="wide", page_icon="🌐")
+st.set_page_config(page_title="Wolt Market Radar PRO", layout="wide", page_icon="🕵️")
 
-# Rečnik gradova sa koordinatama
 CITIES = {
     "Beograd": (44.7866, 20.4489),
     "Niš": (43.3209, 21.8958),
@@ -23,14 +22,18 @@ CITIES = {
     "Subotica": (46.1005, 19.6651)
 }
 
-geolocator = Nominatim(user_agent="wolt_multi_city_radar")
+geolocator = Nominatim(user_agent="wolt_market_spy_v5")
+
+# Inicijalizacija session state-a za tajmer
+if 'timer_active' not in st.session_state:
+    st.session_state.timer_active = False
 
 # --- FUNKCIJE ---
 
 def fetch_wolt_data(lat, lon):
     url = "https://restaurant-api.wolt.com/v1/pages/restaurants"
     params = {"lat": lat, "lon": lon}
-    kolone = ["Ime", "Status", "Ocena", "Adresa", "Info", "Online", "Lat", "Lon"]
+    kolone = ["Ime", "Status", "Radno Vreme", "Ocena", "Adresa", "Online", "Lat", "Lon"]
     
     try:
         r = requests.get(url, params=params, impersonate="chrome120", timeout=15)
@@ -41,9 +44,9 @@ def fetch_wolt_data(lat, lon):
                 for item in section.get("items", []):
                     v = item.get("venue")
                     if v:
-                        # Wolt API za radno vreme često zahteva poseban poziv po restoranu, 
-                        # ovde uzimamo dostupne meta podatke o dostavi
-                        deliv_info = v.get("delivery_specs", {}).get("delivery_times", "Info u aplikaciji")
+                        # EKSTRAKCIJA RADNOG VREMENA
+                        # Wolt nekad šalje status tipa "Zatvara se u 23:00" u polju 'status_next_change'
+                        status_text = v.get("short_description", "")
                         
                         restorani.append({
                             "Ime": v.get("name", "Nepoznato"),
@@ -53,58 +56,89 @@ def fetch_wolt_data(lat, lon):
                             "Status": "Otvoreno 🟢" if v.get("online") else "Zatvoreno 🔴",
                             "Online": v.get("online", False),
                             "Ocena": v.get("rating", {}).get("score", "-"),
-                            "Info": deliv_info
+                            "Radno Vreme": status_text if status_text else "Info u aplikaciji"
                         })
-            return pd.DataFrame(restorani).drop_duplicates(subset=['Ime'])
+            # Brisanje duplikata i sortiranje (Otvoreni prvo)
+            df = pd.DataFrame(restorani).drop_duplicates(subset=['Ime'])
+            return df.sort_values(by="Online", ascending=False)
     except:
         pass
     return pd.DataFrame(columns=kolone)
 
-# --- SIDEBAR KONTROLE ---
-st.sidebar.title("🌍 Wolt Kontrola")
+# --- SIDEBAR ---
+st.sidebar.title("🛠️ Kontrola Radara")
 
-# 1. Izbor Grada
-selected_city = st.sidebar.selectbox("Izaberi grad:", list(CITIES.keys()))
-city_lat, city_lon = CITIES[selected_city]
+# 1. Grad i Adresa
+selected_city = st.sidebar.selectbox("1. Izaberi grad:", list(CITIES.keys()))
+base_lat, base_lon = CITIES[selected_city]
 
-# 2. Filter Statusa
+address_input = st.sidebar.text_input("2. Unesi specifičnu adresu (opciono):", placeholder="npr. Bulevar Nemanjića 15")
+
+target_lat, target_lon = base_lat, base_lon
+if address_input:
+    try:
+        location = geolocator.geocode(f"{address_input}, {selected_city}, Serbia")
+        if location:
+            target_lat, target_lon = location.latitude, location.longitude
+            st.sidebar.success("Adresa locirana!")
+    except:
+        st.sidebar.warning("Adresa nije pronađena, koristim centar.")
+
+# 2. Filteri
 st.sidebar.markdown("---")
-show_only_open = st.sidebar.checkbox("Prikaži samo OTVORENE", value=False)
+st.sidebar.subheader("3. Filteri prikaza")
+filter_open = st.sidebar.checkbox("Samo OTVORENI", value=False)
+filter_closed = st.sidebar.checkbox("Samo ZATVORENI", value=False)
 
-# 3. Tajmer
-refresh_min = st.sidebar.number_input("Auto-osvežavanje (min):", 1, 60, 5)
-st_autorefresh(interval=refresh_min * 60000, key="global_refresh")
+# 3. Tajmer i Start
+st.sidebar.markdown("---")
+st.sidebar.subheader("4. Automatizacija")
+refresh_min = st.sidebar.number_input("Interval (min):", 1, 60, 5)
 
-# --- GLAVNI DEO ---
-st.title(f"🚀 Radar: {selected_city}")
-st.caption(f"Osveženo: {datetime.datetime.now().strftime('%H:%M:%S')}")
+if st.sidebar.button("▶️ START REFRESH"):
+    st.session_state.timer_active = True
+
+if st.sidebar.button("⏹️ STOP"):
+    st.session_state.timer_active = False
+
+if st.session_state.timer_active:
+    st_autorefresh(interval=refresh_min * 60000, key="auto_refresh_node")
+    st.sidebar.info(f"🔄 Automatsko osvežavanje aktivno ({refresh_min} min)")
+
+# --- GLAVNI PANEL ---
+st.title(f"📍 Market Radar: {selected_city}")
+if address_input:
+    st.write(f"Lokacija: **{address_input}**")
 
 # Povlačenje podataka
-df = fetch_wolt_data(city_lat, city_lon)
+df = fetch_wolt_data(target_lat, target_lon)
 
-# Filtriranje
-if show_only_open:
+# Primena filtera
+if filter_open and not filter_closed:
     df = df[df['Online'] == True]
+elif filter_closed and not filter_open:
+    df = df[df['Online'] == False]
+elif filter_open and filter_closed:
+    st.warning("Izabrali ste oba filtera, prikazujem sve.")
 
 if not df.empty:
-    # Mapa preko celog ekrana (skoro)
-    m = folium.Map(location=[city_lat, city_lon], zoom_start=14, tiles="cartodbpositron", control_scale=True)
+    # MAPA - Proširena
+    m = folium.Map(location=[target_lat, target_lon], zoom_start=15, tiles="cartodbpositron")
+    
+    # Marker za adresu pretrage
+    folium.Marker([target_lat, target_lon], icon=folium.Icon(color='blue', icon='home')).add_to(m)
 
     for _, r in df.iterrows():
         boja = "green" if r['Online'] else "red"
         
-        # Hover - samo ime (čisto)
-        tooltip = r['Ime']
-        
-        # Klik (Popup) - Detalji
+        # Popup sadržaj - čist i bez nepotrebnih informacija
         popup_html = f"""
-        <div style="font-family: Arial; width: 200px;">
-            <h4>{r['Ime']}</h4>
-            <hr>
+        <div style="font-family: Arial; width: 180px;">
+            <b style="font-size: 14px;">{r['Ime']}</b><br>
+            <hr style="margin: 5px 0;">
             <b>Status:</b> {r['Status']}<br>
-            <b>Dostava info:</b> {r['Info']}<br>
-            <b>Ocena:</b> ⭐ {r['Ocena']}<br>
-            <a href="https://wolt.com/sr/search?q={r['Ime']}" target="_blank">Otvori na Woltu</a>
+            <b>Radno vreme:</b> {r['Radno Vreme']}<br>
+            <b>Ocena:</b> ⭐ {r['Ocena']}
         </div>
         """
         
@@ -115,19 +149,18 @@ if not df.empty:
             fill=True,
             fill_color=boja,
             fill_opacity=0.7,
-            tooltip=tooltip,
+            tooltip=r['Ime'], # Hover samo ime
             popup=folium.Popup(popup_html, max_width=250)
         ).add_to(m)
 
-    # Prikaz mape - širina postavljena na 100% kroz use_container_width
-    st_folium(m, width=1600, height=600, returned_objects=[])
+    st_folium(m, width=1800, height=600, use_container_width=True)
 
-    # Tabela
-    st.markdown("### 📋 Tabela restorana")
+    # TABELA - Sortirana: Otvoreni pa Zatvoreni
+    st.markdown("### 📋 Uporedni prikaz restorana")
     st.dataframe(
-        df[["Ime", "Status", "Ocena", "Adresa"]].sort_values(by="Status", ascending=False),
+        df[["Ime", "Status", "Radno Vreme", "Ocena", "Adresa"]],
         use_container_width=True,
         hide_index=True
     )
 else:
-    st.error("Nema podataka za izabrani grad ili filter.")
+    st.error("Nema podataka za zadate parametre.")
