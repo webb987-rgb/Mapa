@@ -8,9 +8,9 @@ from streamlit_autorefresh import st_autorefresh
 import datetime
 
 # --- KONFIGURACIJA ---
-st.set_page_config(page_title="Wolt Market Radar PRO v12", layout="wide", page_icon="🕵️")
+st.set_page_config(page_title="Wolt Market Radar PRO v13", layout="wide", page_icon="🕵️")
 
-# Gradovi sa koordinatama i URL slug-ovima za direktne linkove
+# Gradovi (Niš prvi)
 CITIES = {
     "Niš": {"coords": (43.3209, 21.8958), "slug": "nis"},
     "Beograd": {"coords": (44.7866, 20.4489), "slug": "beograd"},
@@ -23,11 +23,13 @@ CITIES = {
     "Subotica": {"coords": (46.1005, 19.6651), "slug": "subotica"}
 }
 
-geolocator = Nominatim(user_agent="wolt_radar_v12_final")
+geolocator = Nominatim(user_agent="wolt_radar_v13_final")
 
-# Inicijalizacija session state-a
+# --- SESSION STATE INICIJALIZACIJA ---
 if 'lat' not in st.session_state:
     st.session_state.lat, st.session_state.lon = CITIES["Niš"]["coords"]
+if 'current_city' not in st.session_state:
+    st.session_state.current_city = "Niš"
 if 'timer_active' not in st.session_state:
     st.session_state.timer_active = False
 
@@ -36,7 +38,6 @@ if 'timer_active' not in st.session_state:
 def fetch_wolt_data(lat, lon, city_slug):
     url = "https://restaurant-api.wolt.com/v1/pages/restaurants"
     params = {"lat": lat, "lon": lon}
-    
     try:
         r = requests.get(url, params=params, impersonate="chrome120", timeout=15)
         if r.status_code == 200:
@@ -46,10 +47,8 @@ def fetch_wolt_data(lat, lon, city_slug):
                 for item in section.get("items", []):
                     v = item.get("venue")
                     if v:
-                        venue_slug = v.get("slug")
-                        # Konstrukcija DIREKTNOG linka
-                        direct_link = f"https://wolt.com/sr/srb/{city_slug}/restaurant/{venue_slug}"
-                        
+                        v_slug = v.get("slug")
+                        direct_link = f"https://wolt.com/sr/srb/{city_slug}/restaurant/{v_slug}"
                         restorani.append({
                             "Ime": v.get("name"),
                             "Adresa": v.get("address"),
@@ -65,18 +64,19 @@ def fetch_wolt_data(lat, lon, city_slug):
     except: pass
     return pd.DataFrame()
 
-# --- SIDEBAR ---
+# --- SIDEBAR KONTROLE ---
 st.sidebar.title("🛠️ Kontrola Radara")
 
-# 1. Izbor Grada
+# 1. Automatski refresh na promenu grada
 grad_naziv = st.sidebar.selectbox("1. Izaberi grad:", list(CITIES.keys()))
-city_info = CITIES[grad_naziv]
 
-if st.sidebar.button("📍 Centriraj na centar grada"):
-    st.session_state.lat, st.session_state.lon = city_info["coords"]
+if grad_naziv != st.session_state.current_city:
+    st.session_state.current_city = grad_naziv
+    st.session_state.lat, st.session_state.lon = CITIES[grad_naziv]["coords"]
     st.cache_data.clear()
+    st.rerun()
 
-# 2. Unos adrese (Ručno)
+# 2. Unos adrese
 st.sidebar.markdown("---")
 adresa_input = st.sidebar.text_input("2. Unesi adresu:", placeholder="npr. Knjaževačka 147")
 if st.sidebar.button("🔍 Nadji adresu"):
@@ -85,7 +85,7 @@ if st.sidebar.button("🔍 Nadji adresu"):
         if loc:
             st.session_state.lat, st.session_state.lon = loc.latitude, loc.longitude
             st.cache_data.clear()
-            st.sidebar.success("Adresa locirana!")
+            st.rerun()
     except: st.sidebar.error("Nije nađeno.")
 
 # 3. Filteri
@@ -100,14 +100,13 @@ if st.sidebar.button("▶️ START AUTO-REFRESH"): st.session_state.timer_active
 if st.sidebar.button("⏹️ STOP"): st.session_state.timer_active = False
 
 if st.session_state.timer_active:
-    st_autorefresh(interval=interval*60000, key="v12_refresh")
+    st_autorefresh(interval=interval*60000, key="v13_refresh")
 
 # --- GLAVNI PANEL ---
 st.title(f"📍 Market Radar: {grad_naziv}")
 st.caption(f"Poslednji sken: {datetime.datetime.now().strftime('%H:%M:%S')}")
 
-# Povlačenje podataka (prosleđujemo i city_slug za linkove)
-df_raw = fetch_wolt_data(st.session_state.lat, st.session_state.lon, city_info["slug"])
+df_raw = fetch_wolt_data(st.session_state.lat, st.session_state.lon, CITIES[grad_naziv]["slug"])
 
 # Brojači
 if not df_raw.empty:
@@ -120,11 +119,9 @@ df_display = df_raw.copy()
 if f_open and not f_closed: df_display = df_display[df_display['Online'] == True]
 elif f_closed and not f_open: df_display = df_display[df_display['Online'] == False]
 
-# --- MAPA (Samo standardna mapa) ---
-st.info("💡 Klikni bilo gde na mapu da promeniš tačku skeniranja ili koristi pretragu levo.")
+# --- MAPA ---
+st.info("💡 Klikni na mapu da promeniš tačku skeniranja ili izaberi grad levo.")
 m = folium.Map(location=[st.session_state.lat, st.session_state.lon], zoom_start=14, tiles="OpenStreetMap")
-
-# Pin za centar
 folium.Marker([st.session_state.lat, st.session_state.lon], icon=folium.Icon(color='blue', icon='home')).add_to(m)
 
 for _, r in df_display.iterrows():
@@ -143,13 +140,10 @@ if map_data and map_data.get("last_clicked"):
         st.cache_data.clear()
         st.rerun()
 
-# --- TABELA SA DIREKTNIM LINKOVIMA ---
-st.markdown("### 📋 Detaljan spisak")
+# --- TABELA ---
 st.dataframe(
     df_display[["Ime", "Status", "Ocena", "Adresa", "Wolt Link"]],
     use_container_width=True,
     hide_index=True,
-    column_config={
-        "Wolt Link": st.column_config.LinkColumn("Direktan Link", display_text="Otvori Restoran 🔗")
-    }
+    column_config={"Wolt Link": st.column_config.LinkColumn("Direktan Link", display_text="Otvori 🔗")}
 )
