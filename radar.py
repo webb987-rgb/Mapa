@@ -2,53 +2,48 @@ import streamlit as st
 from curl_cffi import requests
 import pandas as pd
 import folium
-from streamlit_folium import folium_static
+from streamlit_folium import st_folium
 from geopy.geocoders import Nominatim
 from streamlit_autorefresh import st_autorefresh
 import datetime
 
-# --- KONFIGURACIJA STRANICE ---
-st.set_page_config(page_title="Wolt Niš Radar 2026", layout="wide", page_icon="🍔")
+# --- KONFIGURACIJA ---
+st.set_page_config(page_title="Wolt Market Radar", layout="wide", page_icon="🌐")
 
-# Default koordinate za Niš
-DEFAULT_LAT, DEFAULT_LON = 43.3209, 21.8958
-geolocator = Nominatim(user_agent="wolt_radar_nis_v2")
+# Rečnik gradova sa koordinatama
+CITIES = {
+    "Beograd": (44.7866, 20.4489),
+    "Niš": (43.3209, 21.8958),
+    "Novi Sad": (45.2671, 19.8335),
+    "Kragujevac": (44.0128, 20.9114),
+    "Čačak": (43.8914, 20.3502),
+    "Kruševac": (43.5833, 21.3267),
+    "Kraljevo": (43.7258, 20.6894),
+    "Novi Pazar": (43.1407, 20.5181),
+    "Subotica": (46.1005, 19.6651)
+}
 
-# --- FUNKCIJA ZA GEOLOKACIJU ---
-def get_coords(address):
-    try:
-        location = geolocator.geocode(f"{address}, Niš, Serbia")
-        if location:
-            return location.latitude, location.longitude
-    except:
-        return None, None
-    return None, None
+geolocator = Nominatim(user_agent="wolt_multi_city_radar")
 
-# --- FUNKCIJA ZA SKUPLJANJE PODATAKA (CURL_CFFI) ---
+# --- FUNKCIJE ---
+
 def fetch_wolt_data(lat, lon):
     url = "https://restaurant-api.wolt.com/v1/pages/restaurants"
     params = {"lat": lat, "lon": lon}
-    
-    # Predefinisane kolone da Pandas nikad ne pukne (KeyError fix)
-    kolone = ["Ime", "Status", "Ocena", "Adresa", "Radno Vreme", "Online", "Lat", "Lon"]
+    kolone = ["Ime", "Status", "Ocena", "Adresa", "Info", "Online", "Lat", "Lon"]
     
     try:
-        # Koristimo impersonate za Chrome 120 da nas Wolt ne blokira
         r = requests.get(url, params=params, impersonate="chrome120", timeout=15)
-        
         if r.status_code == 200:
             data = r.json()
             restorani = []
-            
             for section in data.get("sections", []):
                 for item in section.get("items", []):
                     v = item.get("venue")
                     if v:
-                        # Pokušavamo da izvučemo radno vreme ili procenjeno vreme dostave
-                        # Wolt često drži radno vreme u 'delivery_specs' ili 'short_description'
-                        radno_vreme = v.get("short_description", "Pogledaj u aplikaciji")
-                        if not radno_vreme:
-                            radno_vreme = "Radno vreme nije dostupno"
+                        # Wolt API za radno vreme često zahteva poseban poziv po restoranu, 
+                        # ovde uzimamo dostupne meta podatke o dostavi
+                        deliv_info = v.get("delivery_specs", {}).get("delivery_times", "Info u aplikaciji")
                         
                         restorani.append({
                             "Ime": v.get("name", "Nepoznato"),
@@ -58,102 +53,81 @@ def fetch_wolt_data(lat, lon):
                             "Status": "Otvoreno 🟢" if v.get("online") else "Zatvoreno 🔴",
                             "Online": v.get("online", False),
                             "Ocena": v.get("rating", {}).get("score", "-"),
-                            "Radno Vreme": radno_vreme
+                            "Info": deliv_info
                         })
-            
-            if not restorani:
-                return pd.DataFrame(columns=kolone)
-            
             return pd.DataFrame(restorani).drop_duplicates(subset=['Ime'])
-            
-    except Exception as e:
-        st.error(f"Greška pri konekciji sa API-jem: {e}")
-    
+    except:
+        pass
     return pd.DataFrame(columns=kolone)
 
-# --- SIDEBAR: KONTROLE ---
-st.sidebar.title("🛠️ Kontrolna Tabla")
+# --- SIDEBAR KONTROLE ---
+st.sidebar.title("🌍 Wolt Kontrola")
 
-# 1. Autorefresh tajmer
-refresh_min = st.sidebar.number_input("Osvežavanje (minuta):", min_value=1, max_value=60, value=5)
-st_autorefresh(interval=refresh_min * 60000, key="wolt_refresher")
+# 1. Izbor Grada
+selected_city = st.sidebar.selectbox("Izaberi grad:", list(CITIES.keys()))
+city_lat, city_lon = CITIES[selected_city]
 
+# 2. Filter Statusa
 st.sidebar.markdown("---")
+show_only_open = st.sidebar.checkbox("Prikaži samo OTVORENE", value=False)
 
-# 2. Promena lokacije
-address_input = st.sidebar.text_input("📍 Proveri drugu adresu (Niš):", placeholder="npr. Bulevar Nemanjića")
+# 3. Tajmer
+refresh_min = st.sidebar.number_input("Auto-osvežavanje (min):", 1, 60, 5)
+st_autorefresh(interval=refresh_min * 60000, key="global_refresh")
 
-if address_input:
-    target_lat, target_lon = get_coords(address_input)
-    if not target_lat:
-        st.sidebar.error("Adresa nije nađena, koristim centar Niša.")
-        target_lat, target_lon = DEFAULT_LAT, DEFAULT_LON
-else:
-    target_lat, target_lon = DEFAULT_LAT, DEFAULT_LON
-
-# --- GLAVNI EKRAN ---
-st.title("🍔 Wolt Radar Niš - Uživo")
-st.caption(f"Poslednji sken urađen u: **{datetime.datetime.now().strftime('%H:%M:%S')}**")
+# --- GLAVNI DEO ---
+st.title(f"🚀 Radar: {selected_city}")
+st.caption(f"Osveženo: {datetime.datetime.now().strftime('%H:%M:%S')}")
 
 # Povlačenje podataka
-df = fetch_wolt_data(target_lat, target_lon)
+df = fetch_wolt_data(city_lat, city_lon)
 
-# --- PRIKAZ PODATAKA ---
+# Filtriranje
+if show_only_open:
+    df = df[df['Online'] == True]
+
 if not df.empty:
-    # 1. Statistika na vrhu
-    s1, s2, s3 = st.columns(3)
-    s1.metric("Ukupno restorana", len(df))
-    s2.metric("Otvoreno", len(df[df['Online'] == True]))
-    s3.metric("Zatvoreno", len(df[df['Online'] == False]))
-
-    # 2. Mapa sa tooltipovima (Hover radno vreme)
-    st.markdown("### 🗺️ Interaktivna mapa")
-    m = folium.Map(location=[target_lat, target_lon], zoom_start=15, tiles="cartodbpositron")
-    
-    # Marker za tvoju lokaciju
-    folium.Marker(
-        [target_lat, target_lon],
-        icon=folium.Icon(color="blue", icon="home"),
-        popup="Tvoja lokacija pretrage"
-    ).add_to(m)
+    # Mapa preko celog ekrana (skoro)
+    m = folium.Map(location=[city_lat, city_lon], zoom_start=14, tiles="cartodbpositron", control_scale=True)
 
     for _, r in df.iterrows():
-        if r['Lat'] == 0: continue
-        
         boja = "green" if r['Online'] else "red"
         
-        # Sklapanje teksta za TOOLTIP (prikazuje se na HOVER - kad staviš miša)
-        tooltip_html = f"""
-        <div style="font-family: Arial; font-size: 13px;">
-            <b>{r['Ime']}</b><br>
-            Status: {r['Status']}<br>
-            Radno vreme/Opis: {r['Radno Vreme']}<br>
-            ⭐ Ocena: {r['Ocena']}
+        # Hover - samo ime (čisto)
+        tooltip = r['Ime']
+        
+        # Klik (Popup) - Detalji
+        popup_html = f"""
+        <div style="font-family: Arial; width: 200px;">
+            <h4>{r['Ime']}</h4>
+            <hr>
+            <b>Status:</b> {r['Status']}<br>
+            <b>Dostava info:</b> {r['Info']}<br>
+            <b>Ocena:</b> ⭐ {r['Ocena']}<br>
+            <a href="https://wolt.com/sr/search?q={r['Ime']}" target="_blank">Otvori na Woltu</a>
         </div>
         """
         
         folium.CircleMarker(
             location=[r['Lat'], r['Lon']],
-            radius=9,
+            radius=10,
             color=boja,
             fill=True,
             fill_color=boja,
             fill_opacity=0.7,
-            tooltip=folium.Tooltip(tooltip_html), # Ovo je deo za hover
-            popup=f"<b>{r['Ime']}</b><br>{r['Adresa']}"
+            tooltip=tooltip,
+            popup=folium.Popup(popup_html, max_width=250)
         ).add_to(m)
 
-    folium_static(m, width=1200, height=500)
+    # Prikaz mape - širina postavljena na 100% kroz use_container_width
+    st_folium(m, width=1600, height=600, returned_objects=[])
 
-    # 3. Tabela ispod mape
-    st.markdown("### 📋 Spisak svih restorana")
-    # Sortiramo da otvoreni uvek budu prvi
-    df_sorted = df[["Ime", "Status", "Radno Vreme", "Ocena", "Adresa"]].sort_values(by="Status", ascending=False)
-    st.dataframe(df_sorted, use_container_width=True, hide_index=True)
-
+    # Tabela
+    st.markdown("### 📋 Tabela restorana")
+    st.dataframe(
+        df[["Ime", "Status", "Ocena", "Adresa"]].sort_values(by="Status", ascending=False),
+        use_container_width=True,
+        hide_index=True
+    )
 else:
-    st.warning("Trenutno nema podataka. Pokušaj da promeniš adresu ili osvežiš stranicu.")
-
-# Footer
-st.markdown("---")
-st.markdown("🚀 *Sveti Gral Radar v3.1*")
+    st.error("Nema podataka za izabrani grad ili filter.")
