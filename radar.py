@@ -8,9 +8,9 @@ from streamlit_autorefresh import st_autorefresh
 import datetime
 
 # --- KONFIGURACIJA ---
-st.set_page_config(page_title="Wolt Market Radar v10", layout="wide", page_icon="🌐")
+st.set_page_config(page_title="Wolt Market Radar PRO", layout="wide", page_icon="🌐")
 
-# Gradovi (Niš prvi)
+# Niš je prvi na listi (Default)
 CITIES = {
     "Niš": (43.3209, 21.8958),
     "Beograd": (44.7866, 20.4489),
@@ -23,9 +23,8 @@ CITIES = {
     "Subotica": (46.1005, 19.6651)
 }
 
-geolocator = Nominatim(user_agent="wolt_radar_v10_final")
+geolocator = Nominatim(user_agent="wolt_radar_v11")
 
-# Session State
 if 'lat' not in st.session_state:
     st.session_state.lat, st.session_state.lon = CITIES["Niš"]
 if 'timer_active' not in st.session_state:
@@ -46,36 +45,20 @@ def fetch_wolt_data(lat, lon):
                 for item in section.get("items", []):
                     v = item.get("venue")
                     if v:
-                        # --- EKSTREMNO PRECIZNO RADNO VREME ---
-                        is_online = v.get("online", False)
-                        next_change = v.get("status_next_change") # Format: 2026-05-03T21:00:00Z
-                        vreme_label = "Info u aplikaciji"
-                        
-                        if next_change:
-                            try:
-                                # Izvlačimo samo sate i minute (npr. 21:00)
-                                t_str = next_change.split("T")[1][:5]
-                                # Korekcija za vremensku zonu (opciono, ali Wolt šalje UTC)
-                                h = int(t_str[:2]) + 2 # Približno za Srbiju (CEST)
-                                if h >= 24: h -= 24
-                                t_final = f"{h:02d}:{t_str[3:]}"
-                                
-                                if is_online:
-                                    vreme_label = f"Radi do {t_final}"
-                                else:
-                                    vreme_label = f"Otvara u {t_final}"
-                            except:
-                                vreme_label = "Proveri sate"
+                        ime = v.get("name")
+                        slug = v.get("slug")
+                        # Pravimo direktan link ka Wolt stranici restorana
+                        wolt_link = f"https://wolt.com/sr/search?q={ime.replace(' ', '%20')}"
                         
                         restorani.append({
-                            "Ime": v.get("name"),
+                            "Ime": ime,
                             "Adresa": v.get("address"),
                             "Lat": v.get("location", [0, 0])[1],
                             "Lon": v.get("location", [0, 0])[0],
-                            "Status": "Otvoreno 🟢" if is_online else "Zatvoreno 🔴",
-                            "Online": is_online,
+                            "Status": "Otvoreno 🟢" if v.get("online") else "Zatvoreno 🔴",
+                            "Online": v.get("online", False),
                             "Ocena": v.get("rating", {}).get("score", "-"),
-                            "Radno Vreme": vreme_label
+                            "Wolt Link": wolt_link
                         })
             df = pd.DataFrame(restorani).drop_duplicates(subset=['Ime'])
             return df.sort_values(by="Online", ascending=False)
@@ -83,14 +66,14 @@ def fetch_wolt_data(lat, lon):
     return pd.DataFrame()
 
 # --- SIDEBAR ---
-st.sidebar.title("🛠️ Kontrola")
+st.sidebar.title("🛠️ Kontrola Radara")
 grad = st.sidebar.selectbox("1. Grad:", list(CITIES.keys()))
 if st.sidebar.button("📍 Centriraj na ovaj grad"):
     st.session_state.lat, st.session_state.lon = CITIES[grad]
     st.cache_data.clear()
 
 st.sidebar.markdown("---")
-adresa_input = st.sidebar.text_input("2. Specifična adresa:", placeholder="npr. Knjaževačka 147")
+adresa_input = st.sidebar.text_input("2. Unesi adresu:", placeholder="npr. Knjaževačka 147")
 if st.sidebar.button("🔍 Nadji adresu"):
     try:
         loc = geolocator.geocode(f"{adresa_input}, {grad}, Serbia")
@@ -107,15 +90,18 @@ st.sidebar.markdown("---")
 interval = st.sidebar.number_input("Refresh (min):", 1, 60, 5)
 if st.sidebar.button("▶️ START"): st.session_state.timer_active = True
 if st.sidebar.button("⏹️ STOP"): st.session_state.timer_active = False
-if st.session_state.timer_active: st_autorefresh(interval=interval*60000, key="rfrsh")
+
+if st.session_state.timer_active:
+    st_autorefresh(interval=interval*60000, key="v11_refresh")
 
 # --- GLAVNI PANEL ---
-st.title(f"📍 Radar: {grad}")
+st.title(f"📍 Market Radar: {grad}")
 df_raw = fetch_wolt_data(st.session_state.lat, st.session_state.lon)
 
+# Brojači (Metrike)
 if not df_raw.empty:
     c1, c2, c3 = st.columns(3)
-    c1.metric("Ukupno", len(df_raw))
+    c1.metric("Ukupno na lokaciji", len(df_raw))
     c2.metric("Otvoreno 🟢", len(df_raw[df_raw['Online'] == True]))
     c3.metric("Zatvoreno 🔴", len(df_raw[df_raw['Online'] == False]))
 
@@ -123,26 +109,27 @@ df_display = df_raw.copy()
 if f_open and not f_closed: df_display = df_display[df_display['Online'] == True]
 elif f_closed and not f_open: df_display = df_display[df_display['Online'] == False]
 
-# --- MAPA ---
-# Default je "OpenStreetMap" (Mapa), Satelit je opcija
+# --- MAPA (Default: OpenStreetMap) ---
 m = folium.Map(location=[st.session_state.lat, st.session_state.lon], zoom_start=14, tiles="OpenStreetMap")
 
-# Dodajemo Satelit kao opciju
+# Dodavanje satelita kao opcije (ne kao default)
 folium.TileLayer(
     tiles='https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
-    attr='Esri', name='Satelit', overlay=False
+    attr='Esri', name='Satelitski pregled', overlay=False
 ).add_to(m)
 folium.LayerControl().add_to(m)
 
-# Pinovi
+# Pinovi na mapi
 folium.Marker([st.session_state.lat, st.session_state.lon], icon=folium.Icon(color='blue', icon='home')).add_to(m)
 for _, r in df_display.iterrows():
     boja = "green" if r['Online'] else "red"
-    pop = f"<b>{r['Ime']}</b><br>{r['Radno Vreme']}<br>Ocena: {r['Ocena']}"
-    folium.CircleMarker([r['Lat'], r['Lon']], radius=10, color=boja, fill=True, fill_color=boja, fill_opacity=0.7, tooltip=r['Ime'], popup=folium.Popup(pop, max_width=200)).add_to(m)
+    folium.CircleMarker(
+        [r['Lat'], r['Lon']], radius=10, color=boja, fill=True, fill_color=boja, fill_opacity=0.7, 
+        tooltip=r['Ime'], popup=f"<b>{r['Ime']}</b><br>Ocena: {r['Ocena']}"
+    ).add_to(m)
 
-st.info("💡 Klikni na mapu za novu tačku ili kucaj adresu levo.")
-map_data = st_folium(m, width="100%", height=600, returned_objects=["last_clicked"])
+st.info("💡 Klikni na mapu da promeniš tačku skeniranja. Satelit možeš upaliti u gornjem desnom uglu mape.")
+map_data = st_folium(m, width="100%", height=500, returned_objects=["last_clicked"])
 
 if map_data and map_data.get("last_clicked"):
     nl, ng = map_data["last_clicked"]["lat"], map_data["last_clicked"]["lng"]
@@ -151,4 +138,14 @@ if map_data and map_data.get("last_clicked"):
         st.cache_data.clear()
         st.rerun()
 
-st.dataframe(df_display[["Ime", "Status", "Radno Vreme", "Ocena", "Adresa"]], use_container_width=True, hide_index=True)
+# --- TABELA SA LINKOVIMA ---
+st.markdown("### 📋 Spisak restorana")
+# Koristimo st.column_config da link bude klikabilan
+st.dataframe(
+    df_display[["Ime", "Status", "Ocena", "Adresa", "Wolt Link"]],
+    use_container_width=True,
+    hide_index=True,
+    column_config={
+        "Wolt Link": st.column_config.LinkColumn("Link do restorana", display_text="Otvori na Woltu 🔗")
+    }
+)
