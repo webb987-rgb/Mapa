@@ -10,8 +10,8 @@ import datetime
 st.set_page_config(page_title="Wolt Market Radar v8", layout="wide", page_icon="🕵️")
 
 CITIES = {
-    "Beograd": (44.7866, 20.4489),
     "Niš": (43.3209, 21.8958),
+    "Beograd": (44.7866, 20.4489),   
     "Novi Sad": (45.2671, 19.8335),
     "Kragujevac": (44.0128, 20.9114),
     "Čačak": (43.8914, 20.3502),
