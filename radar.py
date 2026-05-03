@@ -13,7 +13,7 @@ import csv
 import streamlit.components.v1 as components
 
 # --- 1. KONFIGURACIJA ---
-st.set_page_config(page_title="Wolt BI Radar v26.0", layout="wide", page_icon="📡")
+st.set_page_config(page_title="Wolt BI Radar PRO v26.1", layout="wide", page_icon="📡")
 
 CITIES = {
     "Niš": {"coords": (43.3209, 21.8958), "slug": "nis"},
@@ -23,7 +23,7 @@ CITIES = {
 }
 
 DB_FILE = "radar_history.csv"
-geolocator = Nominatim(user_agent="wolt_bi_radar_v26")
+geolocator = Nominatim(user_agent="wolt_bi_radar_v26_1")
 
 # --- 2. SESSION STATE ---
 if 'lat' not in st.session_state:
@@ -74,6 +74,7 @@ def fetch_wolt_data(lat, lon, city_slug):
                         if not kuhinje: kuhinje = v.get("tags", [])
                         restorani.append({
                             "Ime": v.get("name"),
+                            "Wolt Link": f"https://wolt.com/sr/srb/{city_slug}/restaurant/{v.get('slug')}",
                             "Kuhinja_Raw": kuhinje,
                             "Kuhinja_Detalji": ", ".join(kuhinje) if kuhinje else "Ostalo",
                             "Lat": float(v.get("location", [0, 0])[1]),
@@ -81,8 +82,7 @@ def fetch_wolt_data(lat, lon, city_slug):
                             "Status": "Otvoreno 🟢" if v.get("online") else "Zatvoreno 🔴",
                             "Online": v.get("online", False),
                             "Ocena": v.get("rating", {}).get("score", 0),
-                            "Broj_Ocena": int(v.get("rating", {}).get("volume", 0)),
-                            "Wolt Link": f"https://wolt.com/sr/srb/{city_slug}/restaurant/{v.get('slug')}"
+                            "Broj_Ocena": int(v.get("rating", {}).get("volume", 0))
                         })
             return pd.DataFrame(restorani).drop_duplicates(subset=['Ime'])
     except: pass
@@ -104,7 +104,6 @@ if grad_naziv != st.session_state.current_city:
     st.cache_data.clear()
     st.rerun()
 
-# 2. Logika za adresu
 adresa = st.sidebar.text_input("📍 Unesi adresu (npr. Knjaževačka 10, Niš):")
 if st.sidebar.button("Lociraj"):
     loc = geolocator.geocode(adresa)
@@ -113,11 +112,9 @@ if st.sidebar.button("Lociraj"):
         st.cache_data.clear()
         st.rerun()
 
-# 3. Filter statusa
 filter_status = st.sidebar.radio("Prikaži samo:", ["Sve", "Otvoreno 🟢", "Zatvoreno 🔴"])
 
 st.sidebar.markdown("---")
-# 1. Tajmer logika
 refresh_min = st.sidebar.number_input("Auto-refresh (min):", 1, 60, 5)
 st.session_state.timer_active = st.sidebar.toggle("▶️ Aktiviraj Tajmer", value=st.session_state.timer_active)
 
@@ -135,7 +132,7 @@ if not df_raw.empty:
 
 tab1, tab2, tab3, tab4 = st.tabs(["🟢 Radar", "📉 Analiza ponude", "📈 Traffic Tracker", "☁️ Service Cloud"])
 
-# TAB 1: RADAR (Klikabilna mapa)
+# TAB 1: RADAR
 with tab1:
     m1 = folium.Map(location=[st.session_state.lat, st.session_state.lon], zoom_start=14)
     folium.Marker([st.session_state.lat, st.session_state.lon], icon=folium.Icon(color='blue', icon='home')).add_to(m1)
@@ -143,33 +140,49 @@ with tab1:
         boja = "green" if r['Online'] else "red"
         folium.CircleMarker([r['Lat'], r['Lon']], radius=7, color=boja, fill=True, tooltip=r['Ime']).add_to(m1)
     
-    # 2. Klik na mapi za izbor adrese
-    st.subheader(f"📍 Trenutna lokacija skeniranja: {st.session_state.lat:.4f}, {st.session_state.lon:.4f}")
+    st.subheader(f"📍 Lokacija skeniranja: {st.session_state.lat:.4f}, {st.session_state.lon:.4f}")
     map_resp = st_folium(m1, width="100%", height=500, key="m1")
     if map_resp and map_resp.get("last_clicked"):
         st.session_state.lat, st.session_state.lon = map_resp["last_clicked"]["lat"], map_resp["last_clicked"]["lng"]
         st.cache_data.clear()
         st.rerun()
-    st.dataframe(df_main[["Ime", "Status", "Ocena", "Kuhinja_Detalji"]], use_container_width=True, hide_index=True)
+    
+    st.dataframe(
+        df_main[["Wolt Link", "Status", "Ocena", "Kuhinja_Detalji"]], 
+        use_container_width=True, hide_index=True,
+        column_config={"Wolt Link": st.column_config.LinkColumn("Restoran (Klikni za Wolt)")}
+    )
 
-# TAB 2: ANALIZA PONUDE
+# TAB 2: ANALIZA PONUDE (Sa mapom i bojama)
 with tab2:
     if not df_main.empty:
         flat_cats = [item for sublist in df_main['Kuhinja_Raw'] for item in sublist]
         unique_cats = sorted(list(set(flat_cats)))
         izbor = st.selectbox("Vrsta hrane:", ["Sve"] + unique_cats)
         df_f = df_main[df_main['Kuhinja_Raw'].apply(lambda x: izbor in x)] if izbor != "Sve" else df_main
-        st.dataframe(df_f[["Ime", "Status", "Ocena", "Wolt Link"]], use_container_width=True, hide_index=True)
+        
+        st.metric(f"Broj {izbor} objekata", len(df_f))
+        
+        # Mapa za analizu ponude
+        m2 = folium.Map(location=[st.session_state.lat, st.session_state.lon], zoom_start=14)
+        for _, r in df_f.iterrows():
+            boja = "green" if r['Online'] else "red"
+            folium.CircleMarker([r['Lat'], r['Lon']], radius=8, color=boja, fill=True, fill_opacity=0.7, tooltip=r['Ime']).add_to(m2)
+        
+        st_folium(m2, width="100%", height=500, key="m2")
+        
+        st.dataframe(
+            df_f[["Wolt Link", "Status", "Ocena", "Kuhinja_Detalji"]], 
+            use_container_width=True, hide_index=True,
+            column_config={"Wolt Link": st.column_config.LinkColumn("Restoran (Klikni za Wolt)")}
+        )
 
-# TAB 3: TRAFFIC TRACKER (Nova Logika)
+# TAB 3: TRAFFIC TRACKER
 with tab3:
     st.title("📈 Traffic & Order Tracker")
-    col_save, col_info = st.columns([1, 2])
-    
-    with col_save:
-        if st.button("💾 SNIMI SNIMAK SADA"):
-            save_snapshot(df_raw)
-            st.success(f"Snimljeno stanje za {len(df_raw)} restorana!")
+    if st.button("💾 SNIMI SNIMAK SADA"):
+        save_snapshot(df_raw)
+        st.success(f"Snimljeno stanje!")
 
     if os.path.exists(DB_FILE):
         h = pd.read_csv(DB_FILE, on_bad_lines='skip')
@@ -177,31 +190,26 @@ with tab3:
         h = h.dropna(subset=['timestamp'])
         ts = sorted(h['timestamp'].unique())
 
-        # 4. Prikaz "Početne" tačke (poslednji snimak)
-        st.subheader("📋 Poslednji snimak (Trenutno stanje u bazi)")
+        st.subheader("📋 Poslednji snimak u bazi")
         df_last = h[h['timestamp'] == ts[-1]]
         st.dataframe(df_last[["Ime", "Broj_Ocena", "timestamp"]].sort_values(by="Broj_Ocena", ascending=False), hide_index=True)
 
         if len(ts) >= 2:
             st.divider()
             st.subheader(f"🚀 Analiza rasta: {ts[-2].strftime('%H:%M')} ➔ {ts[-1].strftime('%H:%M')}")
-            
             df_now = h[h['timestamp'] == ts[-1]].copy()
             df_pre = h[h['timestamp'] == ts[-2]].copy()
-            
             df_now['Broj_Ocena'] = pd.to_numeric(df_now['Broj_Ocena'], errors='coerce').fillna(0)
             df_pre['Broj_Ocena'] = pd.to_numeric(df_pre['Broj_Ocena'], errors='coerce').fillna(0)
             
             m = pd.merge(df_now, df_pre, on="Ime", suffixes=('_sad', '_pre'))
             m['Nove_Ocene'] = m['Broj_Ocena_sad'] - m['Broj_Ocena_pre']
-            m['Est_Porudžbine'] = m['Nove_Ocene'] * 10 # BI formula: 1 ocena ~ 10 prodatih jela
+            m['Est_Porudžbine'] = m['Nove_Ocene'] * 10
             
             res = m[m['Nove_Ocene'] > 0].sort_values(by='Nove_Ocene', ascending=False)
             if not res.empty:
                 st.dataframe(res[["Ime", "Nove_Ocene", "Est_Porudžbine"]], use_container_width=True, hide_index=True)
-                st.metric("Ukupan procenjen broj porudžbina u gradu (zadnji interval)", int(res['Est_Porudžbine'].sum()))
-            else:
-                st.info("Nema promene u ocenama od prošlog snimka. Sačekaj malo pa snimi ponovo.")
+                st.metric("Ukupno porudžbina (procena)", int(res['Est_Porudžbine'].sum()))
 
 # TAB 4: SERVICE CLOUD
 with tab4:
