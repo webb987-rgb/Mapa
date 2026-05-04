@@ -13,7 +13,7 @@ import csv
 import streamlit.components.v1 as components
 
 # --- 1. KONFIGURACIJA ---
-st.set_page_config(page_title="Wolt BI Radar PRO v27.0", layout="wide", page_icon="📡")
+st.set_page_config(page_title="Wolt BI Radar PRO v27.1", layout="wide", page_icon="📡")
 
 CITIES = {
     "Niš": {"coords": (43.3209, 21.8958), "slug": "nis"},
@@ -22,16 +22,30 @@ CITIES = {
     "Kragujevac": {"coords": (44.0128, 20.9114), "slug": "kragujevac"}
 }
 
-# Približne koordinate zone dostave za Niš sa slike
+# --- UNAPREĐENE: Precizne koordinate zone dostave za Niš ---
 NIS_ZONE_COORDS = [
-    [43.344, 21.848], [43.355, 21.885], [43.350, 21.930], 
-    [43.335, 21.960], [43.310, 21.975], [43.288, 21.970], 
-    [43.282, 21.940], [43.280, 21.890], [43.295, 21.845], 
-    [43.315, 21.835], [43.335, 21.840]
+    [43.3446, 21.8481], # Severozapad (Gornji Komren rub)
+    [43.3533, 21.8690], # Severozapad rub
+    [43.3571, 21.8988], # Sever (Pantelej rub)
+    [43.3512, 21.9287], # Severoistok (Donja Vrežina rub)
+    [43.3379, 21.9567], # Istok
+    [43.3188, 21.9734], # Istok centar rub
+    [43.3081, 21.9782], # Jugoistok rub (najistočnija tačka kod auto-puta)
+    [43.2981, 21.9691], # Usek 1 (Brzi Brod sever)
+    [43.2921, 21.9676], # Usek 2 (Brzi Brod rub)
+    [43.2878, 21.9547], # Skretanje ka jugu
+    [43.2831, 21.9298], # Jug (Suvi Do rub)
+    [43.2802, 21.8993], # Jug (Palilula rub)
+    [43.2796, 21.8687], # Jug rub
+    [43.2867, 21.8497], # Jugozapad rub
+    [43.2936, 21.8383], # Jugozapad najjužnija tačka (Pasi Poljana rub)
+    [43.3051, 21.8329], # Skretanje ka severu
+    [43.3235, 21.8315], # Zapad (Medoševac rub)
+    [43.3371, 21.8356], # Severozapad rub
 ]
 
 DB_FILE = "radar_history.csv"
-geolocator = Nominatim(user_agent="wolt_bi_radar_v27_0")
+geolocator = Nominatim(user_agent="wolt_bi_radar_v27_1")
 
 # --- 2. SESSION STATE ---
 if 'lat' not in st.session_state:
@@ -140,20 +154,21 @@ if not df_raw.empty:
     if filter_status == "Otvoreno 🟢": df_main = df_raw[df_raw['Online'] == True]
     elif filter_status == "Zatvoreno 🔴": df_main = df_raw[df_raw['Online'] == False]
 
+# --- 7. PANEL SA TABOVIMA ---
 tab1, tab2, tab3, tab4 = st.tabs(["🟢 Radar", "📉 Analiza ponude", "📈 Traffic Tracker", "☁️ Service Cloud"])
 
-# TAB 1: RADAR
+# TAB 1: RADAR (Metrika + Karta + Tabela)
 with tab1:
-    # --- METRIKA ---
     col_m1, col_m2 = st.columns(2)
     col_m1.metric("Otvoreno 🟢", len(df_main[df_main['Online'] == True]))
     col_m2.metric("Zatvoreno 🔴", len(df_main[df_main['Online'] == False]))
     
     m1 = folium.Map(location=[st.session_state.lat, st.session_state.lon], zoom_start=14)
     
-    # Iscrtavanje zone dostave za Niš
+    # Iscrtavanje zone dostave za Niš (sada preciznije)
     if grad_naziv == "Niš":
-        folium.Polygon(locations=NIS_ZONE_COORDS, color="#666666", weight=2, fill=True, fill_color="#666666", fill_opacity=0.15, tooltip="Zona dostave Niš").add_to(m1)
+        # Koristimo malo tamniju sivu i veću prozirnost da se podudara sa visualom
+        folium.Polygon(locations=NIS_ZONE_COORDS, color="#333333", weight=2, fill=True, fill_color="#333333", fill_opacity=0.25, tooltip="Zona dostave Niš").add_to(m1)
     
     folium.Marker([st.session_state.lat, st.session_state.lon], icon=folium.Icon(color='blue', icon='home')).add_to(m1)
     for _, r in df_main.iterrows():
@@ -163,7 +178,7 @@ with tab1:
     st_folium(m1, width="100%", height=500, key="m1")
     st.dataframe(df_main[["Wolt Link", "Status", "Ocena", "Kuhinja_Detalji"]], use_container_width=True, hide_index=True, column_config={"Wolt Link": st.column_config.LinkColumn("Restoran")})
 
-# TAB 2: ANALIZA PONUDE
+# TAB 2: ANALIZA PONUDE (Sa preciznom zonom)
 with tab2:
     if not df_main.empty:
         flat_cats = [item for sublist in df_main['Kuhinja_Raw'] for item in sublist]
@@ -171,16 +186,15 @@ with tab2:
         izbor = st.selectbox("Vrsta hrane:", ["Sve"] + unique_cats)
         df_f = df_main[df_main['Kuhinja_Raw'].apply(lambda x: izbor in x)] if izbor != "Sve" else df_main
         
-        # --- METRIKA ZA ANALIZU ---
         col_f1, col_f2 = st.columns(2)
         col_f1.metric(f"{izbor} Otvoreno 🟢", len(df_f[df_f['Online'] == True]))
         col_f2.metric(f"{izbor} Zatvoreno 🔴", len(df_f[df_f['Online'] == False]))
         
         m2 = folium.Map(location=[st.session_state.lat, st.session_state.lon], zoom_start=14)
         
-        # Iscrtavanje zone dostave za Niš
+        # Iscrtavanje precizne zone za Niš
         if grad_naziv == "Niš":
-            folium.Polygon(locations=NIS_ZONE_COORDS, color="#666666", weight=2, fill=True, fill_color="#666666", fill_opacity=0.15).add_to(m2)
+            folium.Polygon(locations=NIS_ZONE_COORDS, color="#333333", weight=2, fill=True, fill_color="#333333", fill_opacity=0.25).add_to(m2)
             
         for _, r in df_f.iterrows():
             boja = "green" if r['Online'] else "red"
