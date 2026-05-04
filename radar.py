@@ -13,7 +13,7 @@ import csv
 import streamlit.components.v1 as components
 
 # --- 1. KONFIGURACIJA ---
-st.set_page_config(page_title="Wolt BI Radar PRO v26.1", layout="wide", page_icon="📡")
+st.set_page_config(page_title="Wolt BI Radar PRO v26.2", layout="wide", page_icon="📡")
 
 CITIES = {
     "Niš": {"coords": (43.3209, 21.8958), "slug": "nis"},
@@ -23,7 +23,7 @@ CITIES = {
 }
 
 DB_FILE = "radar_history.csv"
-geolocator = Nominatim(user_agent="wolt_bi_radar_v26_1")
+geolocator = Nominatim(user_agent="wolt_bi_radar_v26_2")
 
 # --- 2. SESSION STATE ---
 if 'lat' not in st.session_state:
@@ -33,7 +33,7 @@ if 'current_city' not in st.session_state:
 if 'timer_active' not in st.session_state:
     st.session_state.timer_active = False
 
-# --- 3. JS TAJMER (Smooth odbrojavanje) ---
+# --- 3. JS TAJMER ---
 def countdown_timer(minutes):
     seconds = minutes * 60
     html_code = f"""
@@ -57,9 +57,12 @@ def countdown_timer(minutes):
     """
     return components.html(html_code, height=120)
 
-# --- 4. SKREPER ---
+# --- 4. SKREPER (Crash-Proof verzija) ---
 @st.cache_data(ttl=60)
 def fetch_wolt_data(lat, lon, city_slug):
+    # Definišemo kolone unapred da izbegnemo KeyError ako je API prazan
+    prazan_df = pd.DataFrame(columns=["Ime", "Wolt Link", "Kuhinja_Raw", "Kuhinja_Detalji", "Lat", "Lon", "Status", "Online", "Ocena", "Broj_Ocena"])
+    
     url = "https://restaurant-api.wolt.com/v1/pages/restaurants"
     try:
         r = requests.get(url, params={"lat": lat, "lon": lon}, impersonate="chrome120", timeout=15)
@@ -84,9 +87,12 @@ def fetch_wolt_data(lat, lon, city_slug):
                             "Ocena": v.get("rating", {}).get("score", 0),
                             "Broj_Ocena": int(v.get("rating", {}).get("volume", 0))
                         })
+            if not restorani:
+                return prazan_df
             return pd.DataFrame(restorani).drop_duplicates(subset=['Ime'])
-    except: pass
-    return pd.DataFrame()
+    except:
+        return prazan_df
+    return prazan_df
 
 def save_snapshot(df):
     if not df.empty:
@@ -104,7 +110,7 @@ if grad_naziv != st.session_state.current_city:
     st.cache_data.clear()
     st.rerun()
 
-adresa = st.sidebar.text_input("📍 Unesi adresu (npr. Knjaževačka 10, Niš):")
+adresa = st.sidebar.text_input("📍 Unesi adresu:")
 if st.sidebar.button("Lociraj"):
     loc = geolocator.geocode(adresa)
     if loc:
@@ -147,13 +153,14 @@ with tab1:
         st.cache_data.clear()
         st.rerun()
     
-    st.dataframe(
-        df_main[["Wolt Link", "Status", "Ocena", "Kuhinja_Detalji"]], 
-        use_container_width=True, hide_index=True,
-        column_config={"Wolt Link": st.column_config.LinkColumn("Restoran (Klikni za Wolt)")}
-    )
+    if not df_main.empty:
+        st.dataframe(
+            df_main[["Wolt Link", "Status", "Ocena", "Kuhinja_Detalji"]], 
+            use_container_width=True, hide_index=True,
+            column_config={"Wolt Link": st.column_config.LinkColumn("Restoran (Klikni za Wolt)")}
+        )
 
-# TAB 2: ANALIZA PONUDE (Sa mapom i bojama)
+# TAB 2: ANALIZA PONUDE
 with tab2:
     if not df_main.empty:
         flat_cats = [item for sublist in df_main['Kuhinja_Raw'] for item in sublist]
@@ -163,7 +170,6 @@ with tab2:
         
         st.metric(f"Broj {izbor} objekata", len(df_f))
         
-        # Mapa za analizu ponude
         m2 = folium.Map(location=[st.session_state.lat, st.session_state.lon], zoom_start=14)
         for _, r in df_f.iterrows():
             boja = "green" if r['Online'] else "red"
@@ -185,36 +191,34 @@ with tab3:
         st.success(f"Snimljeno stanje!")
 
     if os.path.exists(DB_FILE):
-        h = pd.read_csv(DB_FILE, on_bad_lines='skip')
-        h['timestamp'] = pd.to_datetime(h['timestamp'], errors='coerce')
-        h = h.dropna(subset=['timestamp'])
-        ts = sorted(h['timestamp'].unique())
+        try:
+            h = pd.read_csv(DB_FILE, on_bad_lines='skip')
+            h['timestamp'] = pd.to_datetime(h['timestamp'], errors='coerce')
+            h = h.dropna(subset=['timestamp'])
+            ts = sorted(h['timestamp'].unique())
+            if len(ts) > 0:
+                df_last = h[h['timestamp'] == ts[-1]]
+                st.dataframe(df_last[["Ime", "Broj_Ocena", "timestamp"]].sort_values(by="Broj_Ocena", ascending=False), hide_index=True)
 
-        st.subheader("📋 Poslednji snimak u bazi")
-        df_last = h[h['timestamp'] == ts[-1]]
-        st.dataframe(df_last[["Ime", "Broj_Ocena", "timestamp"]].sort_values(by="Broj_Ocena", ascending=False), hide_index=True)
-
-        if len(ts) >= 2:
-            st.divider()
-            st.subheader(f"🚀 Analiza rasta: {ts[-2].strftime('%H:%M')} ➔ {ts[-1].strftime('%H:%M')}")
-            df_now = h[h['timestamp'] == ts[-1]].copy()
-            df_pre = h[h['timestamp'] == ts[-2]].copy()
-            df_now['Broj_Ocena'] = pd.to_numeric(df_now['Broj_Ocena'], errors='coerce').fillna(0)
-            df_pre['Broj_Ocena'] = pd.to_numeric(df_pre['Broj_Ocena'], errors='coerce').fillna(0)
-            
-            m = pd.merge(df_now, df_pre, on="Ime", suffixes=('_sad', '_pre'))
-            m['Nove_Ocene'] = m['Broj_Ocena_sad'] - m['Broj_Ocena_pre']
-            m['Est_Porudžbine'] = m['Nove_Ocene'] * 10
-            
-            res = m[m['Nove_Ocene'] > 0].sort_values(by='Nove_Ocene', ascending=False)
-            if not res.empty:
-                st.dataframe(res[["Ime", "Nove_Ocene", "Est_Porudžbine"]], use_container_width=True, hide_index=True)
-                st.metric("Ukupno porudžbina (procena)", int(res['Est_Porudžbine'].sum()))
+            if len(ts) >= 2:
+                st.divider()
+                st.subheader(f"🚀 Analiza rasta: {ts[-2].strftime('%H:%M')} ➔ {ts[-1].strftime('%H:%M')}")
+                df_now = h[h['timestamp'] == ts[-1]].copy()
+                df_pre = h[h['timestamp'] == ts[-2]].copy()
+                df_now['Broj_Ocena'] = pd.to_numeric(df_now['Broj_Ocena'], errors='coerce').fillna(0)
+                df_pre['Broj_Ocena'] = pd.to_numeric(df_pre['Broj_Ocena'], errors='coerce').fillna(0)
+                m = pd.merge(df_now, df_pre, on="Ime", suffixes=('_sad', '_pre'))
+                m['Nove_Ocene'] = m['Broj_Ocena_sad'] - m['Broj_Ocena_pre']
+                m['Est_Porudžbine'] = m['Nove_Ocene'] * 10
+                res = m[m['Nove_Ocene'] > 0].sort_values(by='Nove_Ocene', ascending=False)
+                if not res.empty:
+                    st.dataframe(res[["Ime", "Nove_Ocene", "Est_Porudžbine"]], use_container_width=True, hide_index=True)
+        except: st.error("Problem sa čitanjem baze.")
 
 # TAB 4: SERVICE CLOUD
 with tab4:
     m4 = folium.Map(location=[st.session_state.lat, st.session_state.lon], zoom_start=13, tiles="cartodbpositron")
-    df_a = df_main[df_main['Online'] == True]
+    df_a = df_main[df_main['Online'] == True] if not df_main.empty else pd.DataFrame()
     if not df_a.empty:
         pts = [[r['Lat'], r['Lon'], 1.0] for _, r in df_a.iterrows()]
         HeatMap(pts, radius=45, blur=30, gradient={0.2: 'red', 0.5: 'yellow', 1.0: 'green'}).add_to(m4)
