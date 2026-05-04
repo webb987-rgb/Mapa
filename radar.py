@@ -13,7 +13,7 @@ import csv
 import streamlit.components.v1 as components
 
 # --- 1. KONFIGURACIJA ---
-st.set_page_config(page_title="Wolt BI Radar PRO v26.8", layout="wide", page_icon="📡")
+st.set_page_config(page_title="Wolt BI Radar PRO v26.9", layout="wide", page_icon="📡")
 
 CITIES = {
     "Niš": {"coords": (43.3209, 21.8958), "slug": "nis"},
@@ -23,7 +23,7 @@ CITIES = {
 }
 
 DB_FILE = "radar_history.csv"
-geolocator = Nominatim(user_agent="wolt_bi_radar_v26_8")
+geolocator = Nominatim(user_agent="wolt_bi_radar_v26_9")
 
 # --- 2. SESSION STATE ---
 if 'lat' not in st.session_state:
@@ -160,66 +160,68 @@ with tab2:
         st_folium(m2, width="100%", height=500, key="m2")
         st.dataframe(df_f[["Wolt Link", "Status", "Ocena"]], use_container_width=True, hide_index=True, column_config={"Wolt Link": st.column_config.LinkColumn("Restoran")})
 
-# TAB 3: TRAFFIC TRACKER
+# --- TAB 3: TRAFFIC TRACKER (IZMENJENA LOGIKA) ---
 with tab3:
-    st.title("📈 Traffic Tracker")
-    if st.button("💾 SNIMI TRENUTNO STANJE (Novi Snapshot)"):
+    st.title("📈 Traffic Tracker: Instant Upoređivanje")
+    
+    if st.button("💾 SNIMI I UPOREDI"):
+        # 1. Uzimamo poslednji snimak iz baze PRE nego što dodamo novi
+        prev_data = pd.DataFrame()
+        if os.path.exists(DB_FILE):
+            h_temp = pd.read_csv(DB_FILE)
+            h_temp['timestamp'] = pd.to_datetime(h_temp['timestamp'])
+            last_ts = h_temp['timestamp'].max()
+            prev_data = h_temp[h_temp['timestamp'] == last_ts].copy()
+
+        # 2. Povlačimo skroz nove podatke
         st.cache_data.clear()
-        new_data = fetch_wolt_data(st.session_state.lat, st.session_state.lon, CITIES[grad_naziv]["slug"])
-        if save_snapshot(new_data):
-            st.success("Uspešno snimljen snapshot!")
-            st.rerun()
-
-    if os.path.exists(DB_FILE):
-        h = pd.read_csv(DB_FILE, on_bad_lines='skip')
-        h['timestamp'] = pd.to_datetime(h['timestamp'])
-        ts = sorted(h['timestamp'].unique())
+        current_data = fetch_wolt_data(st.session_state.lat, st.session_state.lon, CITIES[grad_naziv]["slug"])
         
-        if len(ts) > 0:
-            st.subheader("📋 Poslednji snimak")
-            df_last = h[h['timestamp'] == ts[-1]]
-            st.dataframe(df_last[["Ime", "Broj_Ocena", "timestamp"]].sort_values(by="Broj_Ocena", ascending=False), hide_index=True)
-
-        if len(ts) >= 2:
-            st.divider()
-            st.subheader(f"🚀 Analiza rasta")
-            df_now = h[h['timestamp'] == ts[-1]].copy()
-            df_pre = h[h['timestamp'] == ts[-2]].copy()
+        # 3. Snimamo nove podatke u bazu
+        save_snapshot(current_data)
+        
+        # 4. Ako imamo sa čim da uporedimo, radimo analizu odmah
+        if not prev_data.empty and not current_data.empty:
+            df_now = current_data.copy()
+            df_pre = prev_data.copy()
+            
             df_now['Broj_Ocena'] = pd.to_numeric(df_now['Broj_Ocena'], errors='coerce').fillna(0)
             df_pre['Broj_Ocena'] = pd.to_numeric(df_pre['Broj_Ocena'], errors='coerce').fillna(0)
+            
             m = pd.merge(df_now, df_pre, on="Ime", suffixes=('_sad', '_pre'))
-            m['Rast'] = m['Broj_Ocena_sad'] - m['Broj_Ocena_pre']
-            m['Est_Prodaja'] = m['Rast'] * 10
-            res = m[m['Rast'] > 0].sort_values(by='Rast', ascending=False)
-            if not res.empty:
-                st.dataframe(res[["Ime", "Rast", "Est_Prodaja"]], use_container_width=True, hide_index=True)
-        
-        if st.button("🗑️ OBRIŠI CELU BAZU"):
-            if os.path.exists(DB_FILE):
-                os.remove(DB_FILE)
-                st.rerun()
-    else:
-        st.info("Baza je prazna.")
+            m['Rast_Ocena'] = m['Broj_Ocena_sad'] - m['Broj_Ocena_pre']
+            m['Est_Porudžbine'] = m['Rast_Ocena'] * 10
+            
+            res = m[m['Rast_Ocena'] > 0].sort_values(by='Rast_Ocena', ascending=False)
+            
+            st.session_state.traffic_result = res
+            st.session_state.traffic_total = int(res['Est_Porudžbine'].sum())
+            st.session_state.traffic_time = f"{last_ts.strftime('%H:%M:%S')} ➔ {datetime.datetime.now().strftime('%H:%M:%S')}"
+        else:
+            st.info("Ovo je tvoj prvi snimak. Klikni ponovo za analizu rasta čim prođe malo vremena.")
 
-# TAB 4: SERVICE CLOUD (INVERTOVANA LOGIKA BOJA)
+    # Prikaz rezultata ako postoje u session state-u
+    if 'traffic_result' in st.session_state:
+        st.success(f"Analiza završena za interval: {st.session_state.traffic_time}")
+        if not st.session_state.traffic_result.empty:
+            st.metric("Ukupno novih porudžbina u gradu (procena)", st.session_state.traffic_total)
+            st.dataframe(st.session_state.traffic_result[["Ime", "Rast_Ocena", "Est_Porudžbine"]], use_container_width=True, hide_index=True)
+        else:
+            st.warning("Nema promena u ocenama od prošlog klika.")
+
+    st.divider()
+    if st.button("🗑️ Resetuj bazu"):
+        if os.path.exists(DB_FILE): os.remove(DB_FILE)
+        if 'traffic_result' in st.session_state: del st.session_state.traffic_result
+        st.rerun()
+
+# TAB 4: SERVICE CLOUD
 with tab4:
     st.subheader("☁️ Service Cloud (Dostupnost i Brzina)")
     m4 = folium.Map(location=[st.session_state.lat, st.session_state.lon], zoom_start=13, tiles="cartodbpositron")
     df_a = df_main[df_main['Online'] == True] if not df_main.empty else pd.DataFrame()
-    
     if not df_a.empty:
         pts = [[r['Lat'], r['Lon'], 1.0] for _, r in df_a.iterrows()]
-        
-        # INVERTOVANI GRADIENT: 
-        # Visoka gustina (centar/fast) -> Plava/Zelena
-        # Niska gustina (periferija/slow) -> Crvena/Narandžasta
-        inverted_gradient = {
-            0.2: '#FF0000', # Crvena (Najsporije/Najređe)
-            0.4: '#FF8C00', # Narandžasta
-            0.6: '#FFFF00', # Žuta
-            0.8: '#00FF00', # Zelena
-            1.0: '#0000FF'  # Plava (Najbrže/Najgušće)
-        }
-        
+        inverted_gradient = {0.2: '#FF0000', 0.4: '#FF8C00', 0.6: '#FFFF00', 0.8: '#00FF00', 1.0: '#0000FF'}
         HeatMap(pts, radius=45, blur=30, gradient=inverted_gradient).add_to(m4)
         folium_static(m4, width=1400, height=800)
