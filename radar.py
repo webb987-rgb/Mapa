@@ -13,7 +13,7 @@ import csv
 import streamlit.components.v1 as components
 
 # --- 1. KONFIGURACIJA ---
-st.set_page_config(page_title="Wolt BI Radar PRO v26.9", layout="wide", page_icon="📡")
+st.set_page_config(page_title="Wolt BI Radar PRO v27.0", layout="wide", page_icon="📡")
 
 CITIES = {
     "Niš": {"coords": (43.3209, 21.8958), "slug": "nis"},
@@ -22,8 +22,16 @@ CITIES = {
     "Kragujevac": {"coords": (44.0128, 20.9114), "slug": "kragujevac"}
 }
 
+# Približne koordinate zone dostave za Niš sa slike
+NIS_ZONE_COORDS = [
+    [43.344, 21.848], [43.355, 21.885], [43.350, 21.930], 
+    [43.335, 21.960], [43.310, 21.975], [43.288, 21.970], 
+    [43.282, 21.940], [43.280, 21.890], [43.295, 21.845], 
+    [43.315, 21.835], [43.335, 21.840]
+]
+
 DB_FILE = "radar_history.csv"
-geolocator = Nominatim(user_agent="wolt_bi_radar_v26_9")
+geolocator = Nominatim(user_agent="wolt_bi_radar_v27_0")
 
 # --- 2. SESSION STATE ---
 if 'lat' not in st.session_state:
@@ -136,7 +144,17 @@ tab1, tab2, tab3, tab4 = st.tabs(["🟢 Radar", "📉 Analiza ponude", "📈 Tra
 
 # TAB 1: RADAR
 with tab1:
+    # --- METRIKA ---
+    col_m1, col_m2 = st.columns(2)
+    col_m1.metric("Otvoreno 🟢", len(df_main[df_main['Online'] == True]))
+    col_m2.metric("Zatvoreno 🔴", len(df_main[df_main['Online'] == False]))
+    
     m1 = folium.Map(location=[st.session_state.lat, st.session_state.lon], zoom_start=14)
+    
+    # Iscrtavanje zone dostave za Niš
+    if grad_naziv == "Niš":
+        folium.Polygon(locations=NIS_ZONE_COORDS, color="#666666", weight=2, fill=True, fill_color="#666666", fill_opacity=0.15, tooltip="Zona dostave Niš").add_to(m1)
+    
     folium.Marker([st.session_state.lat, st.session_state.lon], icon=folium.Icon(color='blue', icon='home')).add_to(m1)
     for _, r in df_main.iterrows():
         boja = "green" if r['Online'] else "red"
@@ -153,19 +171,27 @@ with tab2:
         izbor = st.selectbox("Vrsta hrane:", ["Sve"] + unique_cats)
         df_f = df_main[df_main['Kuhinja_Raw'].apply(lambda x: izbor in x)] if izbor != "Sve" else df_main
         
+        # --- METRIKA ZA ANALIZU ---
+        col_f1, col_f2 = st.columns(2)
+        col_f1.metric(f"{izbor} Otvoreno 🟢", len(df_f[df_f['Online'] == True]))
+        col_f2.metric(f"{izbor} Zatvoreno 🔴", len(df_f[df_f['Online'] == False]))
+        
         m2 = folium.Map(location=[st.session_state.lat, st.session_state.lon], zoom_start=14)
+        
+        # Iscrtavanje zone dostave za Niš
+        if grad_naziv == "Niš":
+            folium.Polygon(locations=NIS_ZONE_COORDS, color="#666666", weight=2, fill=True, fill_color="#666666", fill_opacity=0.15).add_to(m2)
+            
         for _, r in df_f.iterrows():
             boja = "green" if r['Online'] else "red"
             folium.CircleMarker([r['Lat'], r['Lon']], radius=8, color=boja, fill=True, tooltip=r['Ime']).add_to(m2)
         st_folium(m2, width="100%", height=500, key="m2")
         st.dataframe(df_f[["Wolt Link", "Status", "Ocena"]], use_container_width=True, hide_index=True, column_config={"Wolt Link": st.column_config.LinkColumn("Restoran")})
 
-# --- TAB 3: TRAFFIC TRACKER (IZMENJENA LOGIKA) ---
+# TAB 3: TRAFFIC TRACKER
 with tab3:
-    st.title("📈 Traffic Tracker: Instant Upoređivanje")
-    
+    st.title("📈 Traffic Tracker")
     if st.button("💾 SNIMI I UPOREDI"):
-        # 1. Uzimamo poslednji snimak iz baze PRE nego što dodamo novi
         prev_data = pd.DataFrame()
         if os.path.exists(DB_FILE):
             h_temp = pd.read_csv(DB_FILE)
@@ -173,51 +199,35 @@ with tab3:
             last_ts = h_temp['timestamp'].max()
             prev_data = h_temp[h_temp['timestamp'] == last_ts].copy()
 
-        # 2. Povlačimo skroz nove podatke
         st.cache_data.clear()
         current_data = fetch_wolt_data(st.session_state.lat, st.session_state.lon, CITIES[grad_naziv]["slug"])
-        
-        # 3. Snimamo nove podatke u bazu
         save_snapshot(current_data)
         
-        # 4. Ako imamo sa čim da uporedimo, radimo analizu odmah
         if not prev_data.empty and not current_data.empty:
             df_now = current_data.copy()
             df_pre = prev_data.copy()
-            
             df_now['Broj_Ocena'] = pd.to_numeric(df_now['Broj_Ocena'], errors='coerce').fillna(0)
             df_pre['Broj_Ocena'] = pd.to_numeric(df_pre['Broj_Ocena'], errors='coerce').fillna(0)
-            
             m = pd.merge(df_now, df_pre, on="Ime", suffixes=('_sad', '_pre'))
             m['Rast_Ocena'] = m['Broj_Ocena_sad'] - m['Broj_Ocena_pre']
             m['Est_Porudžbine'] = m['Rast_Ocena'] * 10
-            
             res = m[m['Rast_Ocena'] > 0].sort_values(by='Rast_Ocena', ascending=False)
-            
             st.session_state.traffic_result = res
             st.session_state.traffic_total = int(res['Est_Porudžbine'].sum())
             st.session_state.traffic_time = f"{last_ts.strftime('%H:%M:%S')} ➔ {datetime.datetime.now().strftime('%H:%M:%S')}"
         else:
             st.info("Ovo je tvoj prvi snimak. Klikni ponovo za analizu rasta čim prođe malo vremena.")
 
-    # Prikaz rezultata ako postoje u session state-u
     if 'traffic_result' in st.session_state:
-        st.success(f"Analiza završena za interval: {st.session_state.traffic_time}")
+        st.success(f"Analiza: {st.session_state.traffic_time}")
         if not st.session_state.traffic_result.empty:
-            st.metric("Ukupno novih porudžbina u gradu (procena)", st.session_state.traffic_total)
+            st.metric("Ukupno novih porudžbina (procena)", st.session_state.traffic_total)
             st.dataframe(st.session_state.traffic_result[["Ime", "Rast_Ocena", "Est_Porudžbine"]], use_container_width=True, hide_index=True)
         else:
-            st.warning("Nema promena u ocenama od prošlog klika.")
-
-    st.divider()
-    if st.button("🗑️ Resetuj bazu"):
-        if os.path.exists(DB_FILE): os.remove(DB_FILE)
-        if 'traffic_result' in st.session_state: del st.session_state.traffic_result
-        st.rerun()
+            st.warning("Nema promena u ocenama.")
 
 # TAB 4: SERVICE CLOUD
 with tab4:
-    st.subheader("☁️ Service Cloud (Dostupnost i Brzina)")
     m4 = folium.Map(location=[st.session_state.lat, st.session_state.lon], zoom_start=13, tiles="cartodbpositron")
     df_a = df_main[df_main['Online'] == True] if not df_main.empty else pd.DataFrame()
     if not df_a.empty:
