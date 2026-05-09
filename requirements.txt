@@ -1,7 +1,7 @@
-streamlit
 curl_cffi
 pandas
 folium
 streamlit-folium
 geopy
 streamlit-autorefresh
+pytz
