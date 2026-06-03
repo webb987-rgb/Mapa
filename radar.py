@@ -60,7 +60,7 @@ def countdown_timer(minutes):
     """
     return components.html(html_code, height=120)
 
-# --- 4. DATA SCRAPER (ROBUST VERSION) ---
+# --- 4. DATA SCRAPER (MULTIPLE PATH PARSER) ---
 @st.cache_data(ttl=60)
 def fetch_wolt_data(lat, lon, city_slug):
     cols = ["Name", "Wolt Link", "Cuisine_Raw", "Cuisine_Details", "Lat", "Lon", "Status", "Online", "Rating", "Rating_Count"]
@@ -68,43 +68,56 @@ def fetch_wolt_data(lat, lon, city_slug):
     url = "https://restaurant-api.wolt.com/v1/pages/restaurants"
     
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Accept-Language": "sr,en-US;q=0.9,en;q=0.8",
         "Referer": f"https://wolt.com/en/srb/{city_slug}",
     }
     
     try:
-        r = requests.get(url, params={"lat": lat, "lon": lon}, headers=headers, impersonate="chrome124", timeout=15)
+        r = requests.get(url, params={"lat": lat, "lon": lon}, headers=headers, impersonate="chrome120", timeout=15)
+        
         if r.status_code != 200:
-            st.error(f"Wolt API je vratio status kod: {r.status_code}. (Moguća Cloudflare blokada)")
+            st.error(f"Wolt API nedostupan. Status kod: {r.status_code}")
             return empty_df
             
         data = r.json()
         restaurants = []
         
         for section in data.get("sections", []):
+            venues_in_section = []
+            
+            # PUTANJA A: Tradicionalni raspored (Preko items -> venue)
             for item in section.get("items", []):
-                v = item.get("venue")
-                if not v:
-                    continue  # Preskače prazne elemente ili navigaciju bez objekta restorana
-                
+                if isinstance(item, dict) and item.get("venue"):
+                    venues_in_section.append(item.get("venue"))
+            
+            # PUTANJA B: Novi raspored sa tvog skrinšota (section -> venue -> venue)
+            if "venue" in section and isinstance(section["venue"], dict):
+                sec_venue = section["venue"]
+                # Provera da li postoji dublje ugneždeni 'venue' ključ kao na slici
+                if "venue" in sec_venue and isinstance(sec_venue["venue"], dict):
+                    venues_in_section.append(sec_venue["venue"])
+                elif "slug" in sec_venue or "id" in sec_venue:
+                    venues_in_section.append(sec_venue)
+            
+            # Obrada sakupljenih restorana iz ove sekcije
+            for v in venues_in_section:
                 try:
-                    # 1. Sigurno izvlačenje lokacije (pokriva i listu i rečnik ukoliko Wolt promeni format)
+                    # Izvlačenje lokacije (provera i za listu i za rečnik)
                     loc = v.get("location")
                     v_lat, v_lon = 0.0, 0.0
                     if isinstance(loc, list) and len(loc) >= 2:
-                        v_lat = float(loc[1])
-                        v_lon = float(loc[0])
+                        v_lat, v_lon = float(loc[1]), float(loc[0])
                     elif isinstance(loc, dict):
                         v_lat = float(loc.get("latitude", loc.get("lat", 0)))
                         v_lon = float(loc.get("longitude", loc.get("lon", 0)))
                     
-                    # 2. Sigurno izvlačenje rejtinga (ako je null, pretvara ga u rečnik bez rušenja aplikacije)
+                    # Siguran rating i volume podataka
                     rating_dict = v.get("rating") or {}
                     score = rating_dict.get("score", 0) if isinstance(rating_dict, dict) else 0
                     volume = rating_dict.get("volume", 0) if isinstance(rating_dict, dict) else 0
                     
-                    # 3. Kuhinje i tagovi
+                    # Kategorije i tagovi kuhinja
                     cats = v.get("categories", []) or []
                     cuisines = [c.get("name") for c in cats if isinstance(c, dict)] or v.get("tags", []) or []
                     
@@ -120,15 +133,14 @@ def fetch_wolt_data(lat, lon, city_slug):
                         "Rating": score,
                         "Rating_Count": int(volume)
                     })
-                except Exception as inner_error:
-                    # Ako pojedinačni restoran ima anomaliju u strukturi, preskačemo ga i idemo dalje
-                    continue
+                except:
+                    continue  # Preskoči problematičan unos i nastavi dalje
                     
         if restaurants:
             return pd.DataFrame(restaurants).drop_duplicates(subset=['Name'])
             
     except Exception as e:
-        st.error(f"Glavna greška prilikom obrade podataka: {e}")
+        st.error(f"Sistemska greška pri parsiranju: {e}")
         
     return empty_df
 
@@ -172,23 +184,26 @@ tab1, tab2, tab3, tab4 = st.tabs(["🟢 Radar", "📉 Market Analysis", "📈 Tr
 
 # --- TAB 1: RADAR ---
 with tab1:
-    col_m1, col_m2 = st.columns(2)
-    col_m1.metric("Open 🟢", len(df_main[df_main['Online'] == True]))
-    col_m2.metric("Closed 🔴", len(df_main[df_main['Online'] == False]))
-    
-    m1 = folium.Map(location=[st.session_state.lat, st.session_state.lon], zoom_start=14)
-    folium.Marker([st.session_state.lat, st.session_state.lon], icon=folium.Icon(color='blue', icon='home')).add_to(m1)
-    for _, r in df_main.iterrows():
-        color = "green" if r['Online'] else "red"
-        folium.CircleMarker([r['Lat'], r['Lon']], radius=7, color=color, fill=True, tooltip=r['Name']).add_to(m1)
-    
-    map_resp = st_folium(m1, width="100%", height=500, key="m1")
-    if map_resp and map_resp.get("last_clicked"):
-        st.session_state.lat, st.session_state.lon = map_resp["last_clicked"]["lat"], map_resp["last_clicked"]["lng"]
-        st.cache_data.clear()
-        st.rerun()
+    if df_main.empty:
+        st.warning("⚠️ Trenutno nema dostupnih podataka. Pomerite mapu ili promenite filter.")
+    else:
+        col_m1, col_m2 = st.columns(2)
+        col_m1.metric("Open 🟢", len(df_main[df_main['Online'] == True]))
+        col_m2.metric("Closed 🔴", len(df_main[df_main['Online'] == False]))
+        
+        m1 = folium.Map(location=[st.session_state.lat, st.session_state.lon], zoom_start=14)
+        folium.Marker([st.session_state.lat, st.session_state.lon], icon=folium.Icon(color='blue', icon='home')).add_to(m1)
+        for _, r in df_main.iterrows():
+            color = "green" if r['Online'] else "red"
+            folium.CircleMarker([r['Lat'], r['Lon']], radius=7, color=color, fill=True, tooltip=r['Name']).add_to(m1)
+        
+        map_resp = st_folium(m1, width="100%", height=500, key="m1")
+        if map_resp and map_resp.get("last_clicked"):
+            st.session_state.lat, st.session_state.lon = map_resp["last_clicked"]["lat"], map_resp["last_clicked"]["lng"]
+            st.cache_data.clear()
+            st.rerun()
 
-    st.dataframe(df_main[["Wolt Link", "Status", "Rating", "Cuisine_Details"]], use_container_width=True, hide_index=True, column_config={"Wolt Link": st.column_config.LinkColumn("Restaurant")})
+        st.dataframe(df_main[["Name", "Status", "Rating", "Cuisine_Details", "Wolt Link"]], use_container_width=True, hide_index=True, column_config={"Wolt Link": st.column_config.LinkColumn("Link")})
 
 # --- TAB 2: MARKET ANALYSIS ---
 with tab2:
