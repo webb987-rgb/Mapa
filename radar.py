@@ -60,28 +60,38 @@ def countdown_timer(minutes):
     """
     return components.html(html_code, height=120)
 
-# --- 4. DATA SCRAPER ---
+# --- 4. DATA SCRAPER (FALLBACK & WAF BYPASS) ---
 @st.cache_data(ttl=60)
 def fetch_wolt_data(lat, lon, city_slug):
     cols = ["Name", "Wolt Link", "Cuisine_Raw", "Cuisine_Details", "Lat", "Lon", "Status", "Online", "Rating", "Rating_Count"]
     empty_df = pd.DataFrame(columns=cols)
-    
-    # Vraćeno na tvoj originalni URL i headers koji su radili instantno
     url = "https://restaurant-api.wolt.com/v1/pages/restaurants"
+    
+    # Obogaćeni headersi sa kritičnim Wolt parametrima za verifikaciju sesije
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-        "Accept-Language": "en-US,en;q=0.9",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "application/json",
+        "Accept-Language": "sr-RS,sr;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Platform": "web",        # <- KRITIČNO: CloudFront odbija zahteve bez definisane platforme
+        "App-Language": "sr",     # <- KRITIČNO
         "Referer": f"https://wolt.com/en/srb/{city_slug}",
     }
     
+    params = {"lat": lat, "lon": lon}
+    
     try:
-        r = requests.get(url, params={"lat": lat, "lon": lon}, headers=headers, impersonate="chrome120", timeout=15)
+        # POKUŠAJ 1: Standardni profil (Chrome 120)
+        r = requests.get(url, params=params, headers=headers, impersonate="chrome120", timeout=12)
         
-        # CRNA KUTIJA: Odmah beležimo sve detalje odgovora pre bilo kakve provere statusa
+        # Ako dobijemo 429, aktiviramo plan B (Menjamo bezbednosni otisak pretraživača u hodu)
+        if r.status_code == 429:
+            headers["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36 Edg/122.0.0.0"
+            r = requests.get(url, params=params, headers=headers, impersonate="edge101", timeout=12)
+            
         st.session_state['raw_api_debug'] = {
             "HTTP Status Kod": r.status_code,
             "Headers sa servera": dict(r.headers),
-            "Sirov tekst odgovora (Prvih 1000 karaktera)": r.text[:1000]
+            "Sirov tekst odgovora (Prvih 500 karaktera)": r.text[:500]
         }
         
         if r.status_code != 200:
@@ -93,12 +103,12 @@ def fetch_wolt_data(lat, lon, city_slug):
         for section in data.get("sections", []):
             venues_in_section = []
             
-            # Putanja A: Klasična (Preko items -> venue)
+            # Putanja A: Klasična struktura
             for item in section.get("items", []):
                 if isinstance(item, dict) and item.get("venue"):
                     venues_in_section.append(item.get("venue"))
             
-            # Putanja B: Nova struktura sa tvog skrinšota (section -> venue -> venue)
+            # Putanja B: Struktura sa tvog skrinšota
             if "venue" in section and isinstance(section["venue"], dict):
                 sec_venue = section["venue"]
                 if "venue" in sec_venue and isinstance(sec_venue["venue"], dict):
@@ -106,7 +116,6 @@ def fetch_wolt_data(lat, lon, city_slug):
                 elif "slug" in sec_venue or "id" in sec_venue:
                     venues_in_section.append(sec_venue)
             
-            # Izvlačenje i čišćenje podataka za svaki pronađeni objekat
             for v in venues_in_section:
                 try:
                     loc = v.get("location")
@@ -121,7 +130,7 @@ def fetch_wolt_data(lat, lon, city_slug):
                     score = rating_dict.get("score", 0) if isinstance(rating_dict, dict) else 0
                     volume = rating_dict.get("volume", 0) if isinstance(rating_dict, dict) else 0
                     
-                    # Čišćenje kuhinja/tagova da ne sruše aplikaciju preko .join() metode
+                    # Sigurna obrada žanrova hrane (kuhinja)
                     cats = v.get("categories", []) or []
                     cuisines = []
                     if isinstance(cats, list):
@@ -151,7 +160,7 @@ def fetch_wolt_data(lat, lon, city_slug):
             return pd.DataFrame(restaurants).drop_duplicates(subset=['Name'])
             
     except Exception as e:
-        st.session_state['raw_api_debug'] = {"Fatalna greška u try bloku": str(e)}
+        st.session_state['raw_api_debug'] = {"Fatalna greška u sistemu": str(e)}
         
     return empty_df
 
@@ -196,14 +205,11 @@ tab1, tab2, tab3, tab4 = st.tabs(["🟢 Radar", "📉 Market Analysis", "📈 Tr
 # --- TAB 1: RADAR ---
 with tab1:
     if df_main.empty:
-        st.error("❌ Prikaz nije moguć jer je tabela sa restoranima prazna.")
+        st.error("❌ Tabela sa restoranima je prazna zbog CloudFront restrikcije.")
         
-        # INSPEKTOR KOJI SADA SIGURNO HVATA REZULTAT
         st.subheader("🔍 BI Radar - Live Debug Inspector")
         if 'raw_api_debug' in st.session_state:
             st.json(st.session_state['raw_api_debug'])
-        else:
-            st.info("Osvežite stranicu da biste generisali izveštaj analize.")
     else:
         col_m1, col_m2 = st.columns(2)
         col_m1.metric("Open 🟢", len(df_main[df_main['Online'] == True]))
