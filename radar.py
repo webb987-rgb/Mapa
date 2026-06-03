@@ -60,12 +60,14 @@ def countdown_timer(minutes):
     """
     return components.html(html_code, height=120)
 
-# --- 4. DATA SCRAPER (MULTIPLE PATH PARSER) ---
+# --- 4. DATA SCRAPER ---
 @st.cache_data(ttl=60)
 def fetch_wolt_data(lat, lon, city_slug):
     cols = ["Name", "Wolt Link", "Cuisine_Raw", "Cuisine_Details", "Lat", "Lon", "Status", "Online", "Rating", "Rating_Count"]
     empty_df = pd.DataFrame(columns=cols)
-    url = "https://restaurant-api.wolt.com/v1/pages/restaurants"
+    
+    # POPRAVKA 1: Prelazak na zvanični consumer API koji koristi sajt wolt.com
+    url = "https://consumer-api.wolt.com/v1/pages/restaurants"
     
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -81,6 +83,14 @@ def fetch_wolt_data(lat, lon, city_slug):
             return empty_df
             
         data = r.json()
+        
+        # Spremamo podatke za dijagnostiku na ekranu u slučaju greške
+        st.session_state['raw_api_debug'] = {
+            "Status Code": r.status_code,
+            "JSON Ključevi": list(data.keys()) if isinstance(data, dict) else "Nije rečnik",
+            "Broj Sekcija (sections)": len(data.get("sections", [])) if isinstance(data, dict) else 0
+        }
+        
         restaurants = []
         
         for section in data.get("sections", []):
@@ -94,7 +104,6 @@ def fetch_wolt_data(lat, lon, city_slug):
             # PUTANJA B: Novi raspored sa tvog skrinšota (section -> venue -> venue)
             if "venue" in section and isinstance(section["venue"], dict):
                 sec_venue = section["venue"]
-                # Provera da li postoji dublje ugneždeni 'venue' ključ kao na slici
                 if "venue" in sec_venue and isinstance(sec_venue["venue"], dict):
                     venues_in_section.append(sec_venue["venue"])
                 elif "slug" in sec_venue or "id" in sec_venue:
@@ -103,7 +112,7 @@ def fetch_wolt_data(lat, lon, city_slug):
             # Obrada sakupljenih restorana iz ove sekcije
             for v in venues_in_section:
                 try:
-                    # Izvlačenje lokacije (provera i za listu i za rečnik)
+                    # Lokacija
                     loc = v.get("location")
                     v_lat, v_lon = 0.0, 0.0
                     if isinstance(loc, list) and len(loc) >= 2:
@@ -112,20 +121,29 @@ def fetch_wolt_data(lat, lon, city_slug):
                         v_lat = float(loc.get("latitude", loc.get("lat", 0)))
                         v_lon = float(loc.get("longitude", loc.get("lon", 0)))
                     
-                    # Siguran rating i volume podataka
+                    # Rating
                     rating_dict = v.get("rating") or {}
                     score = rating_dict.get("score", 0) if isinstance(rating_dict, dict) else 0
                     volume = rating_dict.get("volume", 0) if isinstance(rating_dict, dict) else 0
                     
-                    # Kategorije i tagovi kuhinja
+                    # POPRAVKA 2: Ekstremno sigurno čišćenje kategorija/tagova od None vrednosti (Sprečava TypeError na .join)
                     cats = v.get("categories", []) or []
-                    cuisines = [c.get("name") for c in cats if isinstance(c, dict)] or v.get("tags", []) or []
+                    cuisines = []
+                    if isinstance(cats, list):
+                        cuisines = [str(c.get("name")) for c in cats if isinstance(c, dict) and c.get("name")]
+                    
+                    if not cuisines:
+                        tags = v.get("tags", []) or []
+                        if isinstance(tags, list):
+                            cuisines = [str(t) for t in tags if t]
+                    
+                    cuisine_details = ", ".join(cuisines) if cuisines else "Other"
                     
                     restaurants.append({
                         "Name": v.get("name", "Unknown"),
                         "Wolt Link": f"https://wolt.com/en/srb/{city_slug}/restaurant/{v.get('slug', '')}",
                         "Cuisine_Raw": cuisines,
-                        "Cuisine_Details": ", ".join(cuisines) if cuisines else "Other",
+                        "Cuisine_Details": cuisine_details,
                         "Lat": v_lat,
                         "Lon": v_lon,
                         "Status": "Open 🟢" if v.get("online") else "Closed 🔴",
@@ -134,7 +152,7 @@ def fetch_wolt_data(lat, lon, city_slug):
                         "Rating_Count": int(volume)
                     })
                 except:
-                    continue  # Preskoči problematičan unos i nastavi dalje
+                    continue  
                     
         if restaurants:
             return pd.DataFrame(restaurants).drop_duplicates(subset=['Name'])
@@ -185,7 +203,15 @@ tab1, tab2, tab3, tab4 = st.tabs(["🟢 Radar", "📉 Market Analysis", "📈 Tr
 # --- TAB 1: RADAR ---
 with tab1:
     if df_main.empty:
-        st.warning("⚠️ Trenutno nema dostupnih podataka. Pomerite mapu ili promenite filter.")
+        st.warning("⚠️ Aplikacija je uspešno izvršila kod, ali je rezultat 0 restorana.")
+        
+        # DIJAGNOSTIČKI PANEL UŽIVO
+        st.subheader("🔍 BI Radar - Live Debug Inspector")
+        if 'raw_api_debug' in st.session_state:
+            st.json(st.session_state['raw_api_debug'])
+            st.info("💡 Ako je 'Broj Sekcija (sections)' jednak 0, Wolt namerno šalje prazan odgovor na ovu lokaciju zbog nedostatka parametara sesije (Cookies/Token).")
+        else:
+            st.error("Podaci o sesiji nisu upisani.")
     else:
         col_m1, col_m2 = st.columns(2)
         col_m1.metric("Open 🟢", len(df_main[df_main['Online'] == True]))
