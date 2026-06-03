@@ -60,43 +60,76 @@ def countdown_timer(minutes):
     """
     return components.html(html_code, height=120)
 
-# --- 4. DATA SCRAPER ---
+# --- 4. DATA SCRAPER (ROBUST VERSION) ---
 @st.cache_data(ttl=60)
 def fetch_wolt_data(lat, lon, city_slug):
     cols = ["Name", "Wolt Link", "Cuisine_Raw", "Cuisine_Details", "Lat", "Lon", "Status", "Online", "Rating", "Rating_Count"]
     empty_df = pd.DataFrame(columns=cols)
     url = "https://restaurant-api.wolt.com/v1/pages/restaurants"
+    
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-        "Accept-Language": "en-US,en;q=0.9",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept-Language": "sr,en-US;q=0.9,en;q=0.8",
         "Referer": f"https://wolt.com/en/srb/{city_slug}",
     }
+    
     try:
-        r = requests.get(url, params={"lat": lat, "lon": lon}, headers=headers, impersonate="chrome120", timeout=15)
-        if r.status_code == 200:
-            restaurants = []
-            data = r.json()
-            for section in data.get("sections", []):
-                for item in section.get("items", []):
-                    v = item.get("venue")
-                    if v:
-                        cats = v.get("categories", [])
-                        cuisines = [c.get("name") for c in cats] or v.get("tags", [])
-                        restaurants.append({
-                            "Name": v.get("name"),
-                            "Wolt Link": f"https://wolt.com/en/srb/{city_slug}/restaurant/{v.get('slug')}",
-                            "Cuisine_Raw": cuisines,
-                            "Cuisine_Details": ", ".join(cuisines) if cuisines else "Other",
-                            "Lat": float(v.get("location", [0, 0])[1]),
-                            "Lon": float(v.get("location", [0, 0])[0]),
-                            "Status": "Open 🟢" if v.get("online") else "Closed 🔴",
-                            "Online": v.get("online", False),
-                            "Rating": v.get("rating", {}).get("score", 0),
-                            "Rating_Count": int(v.get("rating", {}).get("volume", 0))
-                        })
-            if restaurants:
-                return pd.DataFrame(restaurants).drop_duplicates(subset=['Name'])
-    except: pass
+        r = requests.get(url, params={"lat": lat, "lon": lon}, headers=headers, impersonate="chrome124", timeout=15)
+        if r.status_code != 200:
+            st.error(f"Wolt API je vratio status kod: {r.status_code}. (Moguća Cloudflare blokada)")
+            return empty_df
+            
+        data = r.json()
+        restaurants = []
+        
+        for section in data.get("sections", []):
+            for item in section.get("items", []):
+                v = item.get("venue")
+                if not v:
+                    continue  # Preskače prazne elemente ili navigaciju bez objekta restorana
+                
+                try:
+                    # 1. Sigurno izvlačenje lokacije (pokriva i listu i rečnik ukoliko Wolt promeni format)
+                    loc = v.get("location")
+                    v_lat, v_lon = 0.0, 0.0
+                    if isinstance(loc, list) and len(loc) >= 2:
+                        v_lat = float(loc[1])
+                        v_lon = float(loc[0])
+                    elif isinstance(loc, dict):
+                        v_lat = float(loc.get("latitude", loc.get("lat", 0)))
+                        v_lon = float(loc.get("longitude", loc.get("lon", 0)))
+                    
+                    # 2. Sigurno izvlačenje rejtinga (ako je null, pretvara ga u rečnik bez rušenja aplikacije)
+                    rating_dict = v.get("rating") or {}
+                    score = rating_dict.get("score", 0) if isinstance(rating_dict, dict) else 0
+                    volume = rating_dict.get("volume", 0) if isinstance(rating_dict, dict) else 0
+                    
+                    # 3. Kuhinje i tagovi
+                    cats = v.get("categories", []) or []
+                    cuisines = [c.get("name") for c in cats if isinstance(c, dict)] or v.get("tags", []) or []
+                    
+                    restaurants.append({
+                        "Name": v.get("name", "Unknown"),
+                        "Wolt Link": f"https://wolt.com/en/srb/{city_slug}/restaurant/{v.get('slug', '')}",
+                        "Cuisine_Raw": cuisines,
+                        "Cuisine_Details": ", ".join(cuisines) if cuisines else "Other",
+                        "Lat": v_lat,
+                        "Lon": v_lon,
+                        "Status": "Open 🟢" if v.get("online") else "Closed 🔴",
+                        "Online": bool(v.get("online", False)),
+                        "Rating": score,
+                        "Rating_Count": int(volume)
+                    })
+                except Exception as inner_error:
+                    # Ako pojedinačni restoran ima anomaliju u strukturi, preskačemo ga i idemo dalje
+                    continue
+                    
+        if restaurants:
+            return pd.DataFrame(restaurants).drop_duplicates(subset=['Name'])
+            
+    except Exception as e:
+        st.error(f"Glavna greška prilikom obrade podataka: {e}")
+        
     return empty_df
 
 def save_snapshot(df):
@@ -181,7 +214,6 @@ with tab3:
 
     if os.path.exists(DB_FILE):
         h = pd.read_csv(DB_FILE)
-        # Rename old Serbian columns to English for compatibility
         h = h.rename(columns={"Ime": "Name", "Broj_Ocena": "Rating_Count", "Ocena": "Rating"})
         h['timestamp'] = pd.to_datetime(h['timestamp'])
         
@@ -221,17 +253,14 @@ with tab3:
     else:
         st.info("Archive is empty.")
 
-# --- TAB 4: SERVICE CLOUD (ORIGINAL HEATMAP LOGIC) ---
+# --- TAB 4: SERVICE CLOUD ---
 with tab4:
-    # Vraćena originalna konfiguracija mape:
     m4 = folium.Map(location=[st.session_state.lat, st.session_state.lon], zoom_start=13, tiles="cartodbpositron")
     df_a = df_main[df_main['Online'] == True] if not df_main.empty else pd.DataFrame()
     
     if not df_a.empty:
         pts = [[r['Lat'], r['Lon'], 1.0] for _, r in df_a.iterrows()]
         
-        # Vraćena originalna gradijentna logika:
-        # 0.2: Red -> 1.0: Blue (Znači gužva/centar je plave boje)
         inverted_gradient = {
             0.2: '#FF0000', 
             0.4: '#FF8C00', 
@@ -240,6 +269,5 @@ with tab4:
             1.0: '#0000FF'
         }
         
-        # Vraćen originalni radijus (45) i blur (30)
         HeatMap(pts, radius=45, blur=30, gradient=inverted_gradient).add_to(m4)
         folium_static(m4, width=1400, height=800)
