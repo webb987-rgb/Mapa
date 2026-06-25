@@ -231,6 +231,22 @@ if st.session_state.timer_active:
 
 # --- 6. DATA PROCESSING ---
 df_raw = fetch_wolt_data(st.session_state.lat, st.session_state.lon, CITIES[city_name]["slug"])
+
+# st.cache_data serijalizuje liste u stringove — konvertuj nazad u liste
+if not df_raw.empty and 'Cuisine_Raw' in df_raw.columns:
+    import ast
+    def parse_cuisine_raw(val):
+        if isinstance(val, list):
+            return val
+        if isinstance(val, str):
+            try:
+                parsed = ast.literal_eval(val)
+                return parsed if isinstance(parsed, list) else []
+            except Exception:
+                return [v.strip() for v in val.split(",") if v.strip()] if val else []
+        return []
+    df_raw['Cuisine_Raw'] = df_raw['Cuisine_Raw'].apply(parse_cuisine_raw)
+
 df_main = df_raw.copy()
 
 if not df_raw.empty:
