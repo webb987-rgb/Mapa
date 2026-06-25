@@ -147,10 +147,30 @@ def fetch_wolt_data(lat, lon, city_slug):
                     volume = rating_dict.get("volume", 0) if isinstance(rating_dict, dict) else 0
                     
                     cats = v.get("categories", []) or v.get("tags", []) or []
-                    # Probaj i "category" (singular) kao fallback
                     if not cats and v.get("category"):
                         cats = [{"name": v.get("category")}]
                     cuisines = [str(c.get("name", c.get("title", ""))) for c in cats if isinstance(c, dict) and (c.get("name") or c.get("title"))]
+
+                    # Fallback: pokušaj iz "food_tags", "labels", "short_description"
+                    if not cuisines:
+                        for field in ["food_tags", "labels", "badge", "badges"]:
+                            extra = v.get(field, [])
+                            if isinstance(extra, list) and extra:
+                                for e in extra:
+                                    if isinstance(e, dict):
+                                        name = e.get("name") or e.get("title") or e.get("text", "")
+                                    else:
+                                        name = str(e)
+                                    if name:
+                                        cuisines.append(name)
+                                break
+                            elif isinstance(extra, str) and extra:
+                                cuisines.append(extra)
+                                break
+
+                    # Sačuvaj raw venue keys za debug (samo jednom)
+                    if 'debug_venue_keys' not in st.session_state:
+                        st.session_state['debug_venue_keys'] = {k: str(v.get(k))[:80] for k in v.keys()}
                     
                     restaurants.append({
                         "Name": v.get("name", "Unknown"),
@@ -168,6 +188,8 @@ def fetch_wolt_data(lat, lon, city_slug):
                     continue
                     
         if restaurants:
+            # Debug: sačuvaj primer venue objekta za inspekciju
+            st.session_state['sample_venue_keys'] = list(restaurants[0].keys()) if restaurants else []
             return pd.DataFrame(restaurants).drop_duplicates(subset=['Name'])
             
     except Exception as e:
@@ -192,7 +214,8 @@ def load_history(city):
         return pd.DataFrame()
     try:
         h = pd.read_csv(DB_FILE)
-        h['timestamp'] = pd.to_datetime(h['timestamp'])
+        h['timestamp'] = pd.to_datetime(h['timestamp'], errors='coerce')
+        h = h.dropna(subset=['timestamp'])  # ukloni NaT redove
         h['Rating_Count'] = pd.to_numeric(h['Rating_Count'], errors='coerce').fillna(0).astype(int)
         if 'city' in h.columns:
             h = h[h['city'] == city]
@@ -285,6 +308,10 @@ with tab1:
             st.rerun()
 
         st.dataframe(df_main[["Name", "Status", "Rating", "Cuisine_Details", "Wolt Link"]], use_container_width=True, hide_index=True, column_config={"Wolt Link": st.column_config.LinkColumn("Link")})
+
+        if 'debug_venue_keys' in st.session_state:
+            with st.expander("🔬 Debug — sva polja koja Wolt API vraća za venue"):
+                st.json(st.session_state['debug_venue_keys'])
 
 # --- TAB 2: MARKET ANALYSIS ---
 with tab2:
