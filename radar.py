@@ -23,6 +23,12 @@ import json
 # --- 1. CONFIGURATION & TIMEZONE ---
 st.set_page_config(page_title="Wolt BI Radar PRO v29.0", layout="wide", page_icon="📡")
 
+# DEBUG - obrisati nakon testiranja
+try:
+    st.sidebar.write("Secrets keys:", list(st.secrets.keys()))
+except Exception as e:
+    st.sidebar.error(f"Nema secrets: {e}")
+
 local_tz = pytz.timezone("Europe/Belgrade")
 
 CITIES = {
