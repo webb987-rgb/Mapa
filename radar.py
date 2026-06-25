@@ -141,19 +141,18 @@ def fetch_wolt_data(lat, lon, city_slug):
         restaurants = []
         slug_to_cuisines = {}
 
-        # DEBUG: sačuvaj strukturu prvih 8 sekcija uvek svežu
+        # DEBUG: detaljna inspekcija
+        sections = data.get("sections", [])
         debug_sections = []
-        for sec in data.get("sections", [])[:8]:
+        for i, sec in enumerate(sections[:8]):
             items = sec.get("items", [])
             first_item = items[0] if items else {}
             debug_sections.append({
+                "index": i,
                 "name": sec.get("name", ""),
                 "title": sec.get("title", ""),
-                "template": sec.get("template", ""),
                 "num_items": len(items),
-                "first_item_keys": list(first_item.keys()),
-                "first_item_has_venue": "venue" in first_item,
-                "first_item_venue_keys": list(first_item.get("venue", {}).keys()) if "venue" in first_item else [],
+                "first_item_FULL": first_item,  # pun sadržaj prvog item-a
             })
         st.session_state['debug_sections'] = debug_sections
         st.session_state['raw_api_debug']['Sekcije (prvih 8)'] = debug_sections
