@@ -133,6 +133,7 @@ def get_gspread_client():
         client = gspread.authorize(creds)
         return client
     except Exception as e:
+        st.sidebar.error(f"gspread auth greška: {e}")
         return None
 
 
