@@ -3,8 +3,7 @@ from curl_cffi import requests
 import pandas as pd
 import folium
 from folium.plugins import HeatMap
-from streamlit_folium import st_folium, folium_static 
-from geopy.geocoders import Nominatim
+from streamlit_folium import st_folium, folium_static
 from streamlit_autorefresh import st_autorefresh
 import numpy as np
 import datetime
@@ -14,9 +13,8 @@ import pytz
 import streamlit.components.v1 as components
 
 # --- 1. CONFIGURATION & TIMEZONE ---
-st.set_page_config(page_title="Wolt BI Radar PRO v28.3", layout="wide", page_icon="📡")
+st.set_page_config(page_title="Wolt BI Radar PRO v28.4", layout="wide", page_icon="📡")
 
-# Postavljanje vremenske zone
 local_tz = pytz.timezone("Europe/Belgrade")
 
 CITIES = {
@@ -60,7 +58,7 @@ def countdown_timer(minutes):
     """
     return components.html(html_code, height=120)
 
-# --- 3.5 WOLT API HEADERS (globalna konstanta) ---
+# --- 3.5 WOLT API HEADERS ---
 WOLT_HEADERS = {
     "accept": "application/json, text/plain, */*",
     "accept-language": "en-US,en;q=0.9,sr-RS;q=0.8,sr;q=0.7",
@@ -86,84 +84,103 @@ WOLT_HEADERS = {
 }
 
 # --- 4. DATA SCRAPER ---
-@st.cache_data(ttl=300)
-def fetch_venue_categories(slug, headers):
-    """Fetchuje kategorije za jedan restoran preko venue detail endpoint-a."""
-    try:
-        url = f"https://consumer-api.wolt.com/v3/venues/slug/{slug}"
-        r = requests.get(url, headers=headers, impersonate="chrome120", timeout=8)
-        if r.status_code != 200:
-            return []
-        data = r.json()
-        # Kategorije su u results[0].categories ili results[0].food_categories
-        venue = data.get("results", [{}])[0] if data.get("results") else {}
-        cats = venue.get("categories", []) or venue.get("food_categories", []) or []
-        cuisines = []
-        for c in cats:
-            if isinstance(c, dict):
-                name = c.get("name") or c.get("title", "")
-                if name:
-                    cuisines.append(str(name))
-            elif isinstance(c, str) and c:
-                cuisines.append(c)
-        return cuisines
-    except Exception:
-        return []
 
 @st.cache_data(ttl=300)
 def fetch_cuisine_map(lat, lon, category_slugs):
-    """Za svaku kategoriju fetchuj koji restorani joj pripadaju."""
+    """Za svaku kategoriju fetchuj koji restorani joj pripadaju — FIXED VERSION."""
     slug_to_cuisines = {}
     url = "https://consumer-api.wolt.com/v1/pages/category/restaurants"
     errors = []
-    
-    for cat_slug, cat_title in category_slugs[:3]:  # samo prvih 3 za test
+
+    for cat_slug, cat_title in category_slugs[:15]:
+        # FIX: dodaj selected_filter koji Wolt API zahteva
         payload = {
             "lat": float(lat),
             "lon": float(lon),
-            "filters": [{"section_slug": "category", "filter_slug": cat_slug}]
+            "filters": [
+                {
+                    "section_slug": "category",
+                    "filter_slug": cat_slug
+                }
+            ],
+            "selected_filter": cat_slug  # ← ovo je ključ koji nedostajao
         }
-        r = requests.post(url, json=payload, headers=WOLT_HEADERS, impersonate="chrome120", timeout=10)
-        errors.append(f"{cat_slug}: HTTP {r.status_code}, body[:100]={r.text[:100]}")
-        if r.status_code != 200:
+
+        try:
+            r = requests.post(url, json=payload, headers=WOLT_HEADERS, impersonate="chrome120", timeout=10)
+        except Exception as e:
+            errors.append(f"{cat_slug}: Exception — {e}")
             continue
-        data = r.json()
-        for section in data.get("sections", []):
+
+        data = {}
+        try:
+            data = r.json()
+        except Exception:
+            errors.append(f"{cat_slug}: HTTP {r.status_code}, nije JSON")
+            continue
+
+        sections = data.get("sections", [])
+        section_names = [s.get("name", "") for s in sections]
+        items_found = 0
+
+        for section in sections:
+            # Preskoči navigacione i filter sekcije
+            if section.get("name") in ("no-location", "filters", "category", "banner"):
+                continue
+
             for item in section.get("items", []):
-                details = item.get("link", {}).get("menu_item_details", {})
+                link = item.get("link", {})
+                details = link.get("menu_item_details", {})
+
+                # Putanja A: direktno venue_slug iz menu_item_details
                 v_slug = details.get("venue_slug", "")
+
+                # Putanja B: izvuci iz target URL-a
+                if not v_slug:
+                    target = link.get("target", "") or link.get("url", "") or ""
+                    parts = target.rstrip("/").split("/")
+                    if "restaurant" in parts:
+                        idx = parts.index("restaurant")
+                        if idx + 1 < len(parts):
+                            v_slug = parts[idx + 1]
+
                 if v_slug:
                     slug_to_cuisines.setdefault(v_slug, set()).add(cat_title)
-    
+                    items_found += 1
+
+        errors.append(
+            f"{cat_slug}: HTTP {r.status_code} | sekcije={section_names} | restorana={items_found}"
+        )
+
     st.session_state['cuisine_debug'] = errors
     return slug_to_cuisines
+
 
 @st.cache_data(ttl=60)
 def fetch_wolt_data(lat, lon, city_slug):
     cols = ["Name", "Wolt Link", "Cuisine_Raw", "Cuisine_Details", "Lat", "Lon", "Status", "Online", "Rating", "Rating_Count"]
     empty_df = pd.DataFrame(columns=cols)
-    
-    # Novi endpoint identifikovan iz tvog cURL-a
+
     url = "https://consumer-api.wolt.com/v1/pages/category/restaurants"
     payload = {"lat": float(lat), "lon": float(lon)}
-    
+
     try:
         r = requests.post(url, json=payload, headers=WOLT_HEADERS, impersonate="chrome120", timeout=15)
-        
+
         st.session_state['raw_api_debug'] = {
             "HTTP Status Kod": r.status_code,
             "Headers sa servera": dict(r.headers),
             "Sirov tekst odgovora (Prvih 300 karaktera)": r.text[:300]
         }
-        
+
         if r.status_code != 200:
             return empty_df
-            
+
         data = r.json()
         sections = data.get("sections", [])
 
         # 1. Izvuci sve kategorije iz sekcije 0
-        category_slugs = []  # [(filter_slug, title), ...]
+        category_slugs = []
         if sections:
             for item in sections[0].get("items", []):
                 link = item.get("link", {})
@@ -173,14 +190,16 @@ def fetch_wolt_data(lat, lon, city_slug):
                 if f_slug and title:
                     category_slugs.append((f_slug, title))
 
-        # 2. Izvuci restorane iz svih sekcija (venue_slug je u menu_item_details)
-        #    Koristimo venue_slug + venue info iz items
-        venue_map = {}  # venue_slug -> venue info dict
+        # 2. Izvuci restorane iz svih sekcija
+        venue_map = {}
         for section in sections:
             for item in section.get("items", []):
                 details = item.get("link", {}).get("menu_item_details", {})
                 v_slug = details.get("venue_slug", "")
                 if v_slug and v_slug not in venue_map:
+                    rating_dict = details.get("venue_rating", {})
+                    score = rating_dict.get("score", 0) if isinstance(rating_dict, dict) else 0
+                    volume = rating_dict.get("volume", 0) if isinstance(rating_dict, dict) else 0
                     venue_map[v_slug] = {
                         "slug": v_slug,
                         "Name": details.get("venue_name", "Unknown"),
@@ -191,11 +210,11 @@ def fetch_wolt_data(lat, lon, city_slug):
                         "Lon": 0.0,
                         "Status": "Open 🟢",
                         "Online": True,
-                        "Rating": details.get("venue_rating", {}).get("score", 0) if isinstance(details.get("venue_rating"), dict) else 0,
-                        "Rating_Count": details.get("venue_rating", {}).get("volume", 0) if isinstance(details.get("venue_rating"), dict) else 0,
+                        "Rating": score,
+                        "Rating_Count": int(volume),
                     }
 
-        # 3. Dopuni koordinate i online status iz originalnih venue objekata (Putanja A/B)
+        # 3. Dopuni koordinate i online status
         for section in sections:
             for item in section.get("items", []):
                 v = item.get("venue") if isinstance(item, dict) else None
@@ -240,23 +259,21 @@ def fetch_wolt_data(lat, lon, city_slug):
 
         restaurants = list(venue_map.values())
 
-        # 4. Fetchuj kuhinje po kategorijama (keširano 5 min)
+        # 4. Fetchuj kuhinje po kategorijama
         slug_to_cuisines = {}
         if category_slugs and restaurants:
-            # Uzmi samo prvih 15 kategorija da ne bude presporo
-            cats_to_fetch = category_slugs[:15]
-            slug_to_cuisines = fetch_cuisine_map(lat, lon, tuple(cats_to_fetch))
+            slug_to_cuisines = fetch_cuisine_map(lat, lon, tuple(category_slugs[:15]))
 
         st.session_state['debug_sections'] = {
             "kategorije_pronadjene": category_slugs[:10],
             "restorana_pronadjeno": len(restaurants),
             "cuisine_mapa_velicina": len(slug_to_cuisines),
+            "cuisine_mapa_sample": {k: list(v) for k, v in list(slug_to_cuisines.items())[:5]},
         }
-                    
+
         if restaurants:
             df_result = pd.DataFrame(restaurants).drop_duplicates(subset=['Name'])
 
-            # Primeni kuhinje iz sekcija
             def assign_cuisines(row):
                 cuisines = sorted(slug_to_cuisines.get(row['slug'], set()))
                 return cuisines
@@ -265,19 +282,17 @@ def fetch_wolt_data(lat, lon, city_slug):
             df_result['Cuisine_Details'] = df_result['Cuisine_Raw'].apply(
                 lambda x: ", ".join(x) if x else "Other"
             )
-            # Ukloni slug kolonu (interna)
             df_result = df_result.drop(columns=['slug'], errors='ignore')
-
             st.session_state['debug_venue_keys'] = {k: str(restaurants[0].get(k, ''))[:80] for k in restaurants[0].keys()} if restaurants else {}
             return df_result
-            
+
     except Exception as e:
         st.session_state['raw_api_debug'] = {"Fatalna greška": str(e)}
-        
+
     return empty_df
 
+
 def save_snapshot(df, city):
-    """Sačuvaj snapshot u fajl specifičan za grad."""
     if not df.empty:
         df_save = df[["Name", "Rating_Count", "Rating", "Online", "Cuisine_Details"]].copy()
         df_save['timestamp'] = datetime.datetime.now(local_tz).strftime('%Y-%m-%d %H:%M:%S')
@@ -287,14 +302,14 @@ def save_snapshot(df, city):
         return True
     return False
 
+
 def load_history(city):
-    """Učitaj istoriju za određeni grad."""
     if not os.path.exists(DB_FILE):
         return pd.DataFrame()
     try:
         h = pd.read_csv(DB_FILE)
         h['timestamp'] = pd.to_datetime(h['timestamp'], errors='coerce')
-        h = h.dropna(subset=['timestamp'])  # ukloni NaT redove
+        h = h.dropna(subset=['timestamp'])
         h['Rating_Count'] = pd.to_numeric(h['Rating_Count'], errors='coerce').fillna(0).astype(int)
         if 'city' in h.columns:
             h = h[h['city'] == city]
@@ -302,8 +317,8 @@ def load_history(city):
     except Exception:
         return pd.DataFrame()
 
+
 def auto_save_if_needed(df, city):
-    """Automatski sačuvaj snapshot ako je prošlo dovoljno vremena od poslednjeg."""
     h = load_history(city)
     now = datetime.datetime.now(local_tz)
     if h.empty:
@@ -314,6 +329,7 @@ def auto_save_if_needed(df, city):
         save_snapshot(df, city)
         return True
     return False
+
 
 # --- 5. SIDEBAR ---
 st.sidebar.title("🛠️ Control Panel")
@@ -344,7 +360,6 @@ if st.session_state.timer_active:
 # --- 6. DATA PROCESSING ---
 df_raw = fetch_wolt_data(st.session_state.lat, st.session_state.lon, CITIES[city_name]["slug"])
 
-# st.cache_data serijalizuje liste u stringove — konvertuj nazad u liste
 if not df_raw.empty and 'Cuisine_Raw' in df_raw.columns:
     import ast
     def parse_cuisine_raw(val):
@@ -362,9 +377,10 @@ if not df_raw.empty and 'Cuisine_Raw' in df_raw.columns:
 df_main = df_raw.copy()
 
 if not df_raw.empty:
-    if filter_status == "Open 🟢": df_main = df_raw[df_raw['Online'] == True]
-    elif filter_status == "Closed 🔴": df_main = df_raw[df_raw['Online'] == False]
-    # Automatski sačuvaj snapshot pri svakom učitavanju (max jednom na 5 min)
+    if filter_status == "Open 🟢":
+        df_main = df_raw[df_raw['Online'] == True]
+    elif filter_status == "Closed 🔴":
+        df_main = df_raw[df_raw['Online'] == False]
     auto_save_if_needed(df_raw, city_name)
 
 tab1, tab2, tab3, tab4 = st.tabs(["🟢 Radar", "📉 Market Analysis", "📈 Traffic Tracker", "☁️ Service Cloud"])
@@ -380,20 +396,26 @@ with tab1:
         col_m1, col_m2 = st.columns(2)
         col_m1.metric("Open 🟢", len(df_main[df_main['Online'] == True]))
         col_m2.metric("Closed 🔴", len(df_main[df_main['Online'] == False]))
-        
+
         m1 = folium.Map(location=[st.session_state.lat, st.session_state.lon], zoom_start=14)
         folium.Marker([st.session_state.lat, st.session_state.lon], icon=folium.Icon(color='blue', icon='home')).add_to(m1)
         for _, r in df_main.iterrows():
             color = "green" if r['Online'] else "red"
             folium.CircleMarker([r['Lat'], r['Lon']], radius=7, color=color, fill=True, tooltip=r['Name']).add_to(m1)
-        
+
         map_resp = st_folium(m1, width="100%", height=500, key="m1")
         if map_resp and map_resp.get("last_clicked"):
-            st.session_state.lat, st.session_state.lon = map_resp["last_clicked"]["lat"], map_resp["last_clicked"]["lng"]
+            st.session_state.lat = map_resp["last_clicked"]["lat"]
+            st.session_state.lon = map_resp["last_clicked"]["lng"]
             st.cache_data.clear()
             st.rerun()
 
-        st.dataframe(df_main[["Name", "Status", "Rating", "Cuisine_Details", "Wolt Link"]], use_container_width=True, hide_index=True, column_config={"Wolt Link": st.column_config.LinkColumn("Link")})
+        st.dataframe(
+            df_main[["Name", "Status", "Rating", "Cuisine_Details", "Wolt Link"]],
+            use_container_width=True,
+            hide_index=True,
+            column_config={"Wolt Link": st.column_config.LinkColumn("Link")}
+        )
 
         with st.expander("🗂️ Debug — struktura API sekcija"):
             if 'debug_sections' in st.session_state:
@@ -408,7 +430,6 @@ with tab2:
     if df_main.empty:
         st.error("❌ Podaci nisu učitani.")
     else:
-        # Flatten cuisine lists, skip empty
         flat_cats = [item for sublist in df_main['Cuisine_Raw'] for item in sublist if item]
         unique_cats = sorted(list(set(flat_cats)))
 
@@ -426,13 +447,11 @@ with tab2:
             else:
                 df_f = df_main
 
-            # Metrics row
             col1, col2, col3 = st.columns(3)
             col1.metric("🏪 Ukupno restorana", len(df_f))
             col2.metric("🟢 Otvoreni", len(df_f[df_f['Online'] == True]))
             col3.metric("🔴 Zatvoreni", len(df_f[df_f['Online'] == False]))
 
-            # Map
             m2 = folium.Map(location=[st.session_state.lat, st.session_state.lon], zoom_start=14)
             for _, r in df_f.iterrows():
                 color = "green" if r['Online'] else "red"
@@ -442,7 +461,6 @@ with tab2:
                 ).add_to(m2)
             st_folium(m2, width="100%", height=500, key="m2")
 
-            # Table of filtered restaurants
             st.subheader(f"📋 Restorani ({len(df_f)})")
             st.dataframe(
                 df_f[["Name", "Status", "Rating", "Rating_Count", "Cuisine_Details", "Wolt Link"]],
@@ -451,12 +469,13 @@ with tab2:
                 column_config={"Wolt Link": st.column_config.LinkColumn("Link")}
             )
 
-            # Cuisine distribution chart (only when "All" selected)
             if selection == "All" and flat_cats:
                 st.subheader("📊 Distribucija kuhinja")
                 from collections import Counter
                 cuisine_counts = Counter(flat_cats)
-                cuisine_df = pd.DataFrame(cuisine_counts.items(), columns=["Kuhinja", "Broj restorana"]).sort_values("Broj restorana", ascending=False).head(20)
+                cuisine_df = pd.DataFrame(
+                    cuisine_counts.items(), columns=["Kuhinja", "Broj restorana"]
+                ).sort_values("Broj restorana", ascending=False).head(20)
                 st.bar_chart(cuisine_df.set_index("Kuhinja"))
 
 # --- TAB 3: TRAFFIC TRACKER ---
@@ -470,7 +489,6 @@ with tab3:
         unique_timestamps = sorted(h['timestamp'].unique()) if not h.empty else []
         num_scans = len(unique_timestamps)
 
-        # ── PRVI SCAN: samo prikaži tabelu ──────────────────────────────────────
         if num_scans <= 1:
             ts_label = unique_timestamps[0].strftime('%d.%m.%Y u %H:%M:%S') if num_scans == 1 else "upravo sada"
             st.info(f"📋 **Ovo je prvi scan** — {ts_label}. Sledeći put kad se aplikacija učita ili osvježi, prikazaće se poređenje.")
@@ -489,10 +507,9 @@ with tab3:
             st.subheader(f"📋 Svi restorani — {len(display_df)} ukupno")
             st.dataframe(display_df, use_container_width=True, hide_index=True)
 
-        # ── SLEDEĆI SCANOVI: poređenje prethodni vs trenutni ────────────────────
         else:
-            prev_ts = unique_timestamps[-1]   # poslednji sačuvani snapshot = "prethodni"
-            curr_ts = datetime.datetime.now(local_tz)  # uvek live vrednost, nikad NaT
+            prev_ts = unique_timestamps[-1]
+            curr_ts = datetime.datetime.now(local_tz)
 
             df_prev = h[h['timestamp'] == prev_ts][["Name", "Rating_Count"]].copy()
             df_prev = df_prev.rename(columns={"Rating_Count": "Ocene_pre"})
@@ -506,10 +523,8 @@ with tab3:
             merged["Δ Ocena"] = merged["Ocene_sada"] - merged["Ocene_pre"]
             merged["Est. narudžbi"] = merged["Δ Ocena"] * 10
 
-            # Novi restorani (nisu bili u prethodnom scanu)
             new_restaurants = merged[merged["Ocene_pre"] == 0]["Name"].tolist()
 
-            # Metrike
             total_new_orders = int(merged[merged["Δ Ocena"] > 0]["Est. narudžbi"].sum())
             active_count = int((merged["Δ Ocena"] > 0).sum())
 
@@ -521,7 +536,6 @@ with tab3:
 
             st.divider()
 
-            # Pripremi tabelu za prikaz
             display = merged[[
                 "Name", "Online", "Cuisine_Details",
                 "Ocene_pre", "Ocene_sada", "Δ Ocena", "Est. narudžbi"
@@ -535,16 +549,8 @@ with tab3:
             })
             display["Status"] = display["Status"].apply(lambda x: "🟢" if x else "🔴")
 
-            # Tabela sa svim restoranima, sortirano po rastu
             st.subheader("📊 Poređenje svih restorana")
             display_sorted = display.sort_values("Δ Ocena", ascending=False)
-
-            # Kolorna oznaka rasta
-            def highlight_growth(val):
-                if isinstance(val, (int, float)):
-                    if val > 0: return 'background-color: #d4edda; color: #155724'
-                    elif val < 0: return 'background-color: #f8d7da; color: #721c24'
-                return ''
 
             st.dataframe(
                 display_sorted,
@@ -557,10 +563,11 @@ with tab3:
             )
 
             if new_restaurants:
-                st.info(f"🆕 **Novi restorani od poslednjeg scana:** {', '.join(new_restaurants[:10])}" +
-                        (f" i još {len(new_restaurants)-10}" if len(new_restaurants) > 10 else ""))
+                st.info(
+                    f"🆕 **Novi restorani od poslednjeg scana:** {', '.join(new_restaurants[:10])}" +
+                    (f" i još {len(new_restaurants)-10}" if len(new_restaurants) > 10 else "")
+                )
 
-            # Dugme za ručni export
             st.divider()
             if st.button("💾 Preuzmi istoriju kao CSV"):
                 full_h = load_history(city_name)
@@ -571,17 +578,17 @@ with tab3:
 with tab4:
     m4 = folium.Map(location=[st.session_state.lat, st.session_state.lon], zoom_start=13, tiles="cartodbpositron")
     df_a = df_main[df_main['Online'] == True] if not df_main.empty else pd.DataFrame()
-    
+
     if not df_a.empty:
         pts = [[r['Lat'], r['Lon'], 1.0] for _, r in df_a.iterrows()]
-        
+
         inverted_gradient = {
-            0.2: '#FF0000', 
-            0.4: '#FF8C00', 
-            0.6: '#FFFF00', 
-            0.8: '#00FF00', 
+            0.2: '#FF0000',
+            0.4: '#FF8C00',
+            0.6: '#FFFF00',
+            0.8: '#00FF00',
             1.0: '#0000FF'
         }
-        
+
         HeatMap(pts, radius=45, blur=30, gradient=inverted_gradient).add_to(m4)
         folium_static(m4, width=1400, height=800)
