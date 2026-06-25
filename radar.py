@@ -141,18 +141,22 @@ def fetch_wolt_data(lat, lon, city_slug):
         restaurants = []
         slug_to_cuisines = {}
 
-        # DEBUG: sačuvaj prvih 5 sekcija za inspekciju
+        # DEBUG: sačuvaj strukturu prvih 8 sekcija uvek svežu
         debug_sections = []
-        for sec in data.get("sections", [])[:5]:
+        for sec in data.get("sections", [])[:8]:
+            items = sec.get("items", [])
+            first_item = items[0] if items else {}
             debug_sections.append({
-                "name": sec.get("name"),
-                "title": sec.get("title"),
-                "template": sec.get("template"),
-                "num_items": len(sec.get("items", [])),
-                "first_item_keys": list(sec.get("items", [{}])[0].keys()) if sec.get("items") else [],
-                "has_venue_key": "venue" in sec,
+                "name": sec.get("name", ""),
+                "title": sec.get("title", ""),
+                "template": sec.get("template", ""),
+                "num_items": len(items),
+                "first_item_keys": list(first_item.keys()),
+                "first_item_has_venue": "venue" in first_item,
+                "first_item_venue_keys": list(first_item.get("venue", {}).keys()) if "venue" in first_item else [],
             })
         st.session_state['debug_sections'] = debug_sections
+        st.session_state['raw_api_debug']['Sekcije (prvih 8)'] = debug_sections
 
         for section in data.get("sections", []):
             # Naziv kuhinje = title sekcije (npr. "Breakfast", "Pizza & Pasta"...)
@@ -287,6 +291,13 @@ if city_name != st.session_state.current_city:
     st.cache_data.clear()
     st.rerun()
 
+st.sidebar.markdown("---")
+if st.sidebar.button("🔄 Force Refresh (Clear Cache)"):
+    st.cache_data.clear()
+    st.session_state.pop('debug_sections', None)
+    st.session_state.pop('debug_venue_keys', None)
+    st.rerun()
+
 filter_status = st.sidebar.radio("Show only:", ["All", "Open 🟢", "Closed 🔴"])
 
 st.sidebar.markdown("---")
@@ -351,13 +362,13 @@ with tab1:
 
         st.dataframe(df_main[["Name", "Status", "Rating", "Cuisine_Details", "Wolt Link"]], use_container_width=True, hide_index=True, column_config={"Wolt Link": st.column_config.LinkColumn("Link")})
 
-        if 'debug_venue_keys' in st.session_state:
-            with st.expander("🔬 Debug — sva polja koja Wolt API vraća za venue"):
-                st.json(st.session_state['debug_venue_keys'])
-
-        if 'debug_sections' in st.session_state:
-            with st.expander("🗂️ Debug — struktura sekcija (prvih 5)"):
+        with st.expander("🗂️ Debug — struktura API sekcija"):
+            if 'debug_sections' in st.session_state:
                 st.json(st.session_state['debug_sections'])
+            elif 'raw_api_debug' in st.session_state:
+                st.json(st.session_state['raw_api_debug'])
+            else:
+                st.warning("Nema debug podataka — klikni Force Refresh u sidebaru")
 
 # --- TAB 2: MARKET ANALYSIS ---
 with tab2:
