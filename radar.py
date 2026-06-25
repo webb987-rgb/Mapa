@@ -139,8 +139,20 @@ def fetch_wolt_data(lat, lon, city_slug):
             
         data = r.json()
         restaurants = []
-        # dict: venue slug -> set of cuisine names (iz naslova sekcija)
         slug_to_cuisines = {}
+
+        # DEBUG: sačuvaj prvih 5 sekcija za inspekciju
+        debug_sections = []
+        for sec in data.get("sections", [])[:5]:
+            debug_sections.append({
+                "name": sec.get("name"),
+                "title": sec.get("title"),
+                "template": sec.get("template"),
+                "num_items": len(sec.get("items", [])),
+                "first_item_keys": list(sec.get("items", [{}])[0].keys()) if sec.get("items") else [],
+                "has_venue_key": "venue" in sec,
+            })
+        st.session_state['debug_sections'] = debug_sections
 
         for section in data.get("sections", []):
             # Naziv kuhinje = title sekcije (npr. "Breakfast", "Pizza & Pasta"...)
@@ -342,6 +354,10 @@ with tab1:
         if 'debug_venue_keys' in st.session_state:
             with st.expander("🔬 Debug — sva polja koja Wolt API vraća za venue"):
                 st.json(st.session_state['debug_venue_keys'])
+
+        if 'debug_sections' in st.session_state:
+            with st.expander("🗂️ Debug — struktura sekcija (prvih 5)"):
+                st.json(st.session_state['debug_sections'])
 
 # --- TAB 2: MARKET ANALYSIS ---
 with tab2:
