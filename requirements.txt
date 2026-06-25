@@ -1,8 +1,10 @@
 streamlit
+curl_cffi
 pandas
-numpy
+folium
+streamlit-folium
+streamlit-autorefresh
+pytz
+gspread
+google-auth
 plotly
-requests
-playwright
-reportlab
- 
