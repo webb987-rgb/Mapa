@@ -60,7 +60,31 @@ def countdown_timer(minutes):
     """
     return components.html(html_code, height=120)
 
-# --- 4. DATA SCRAPER (CURL-MATCHED POST REQUEST) ---
+# --- 4. DATA SCRAPER ---
+@st.cache_data(ttl=300)
+def fetch_venue_categories(slug, headers):
+    """Fetchuje kategorije za jedan restoran preko venue detail endpoint-a."""
+    try:
+        url = f"https://consumer-api.wolt.com/v3/venues/slug/{slug}"
+        r = requests.get(url, headers=headers, impersonate="chrome120", timeout=8)
+        if r.status_code != 200:
+            return []
+        data = r.json()
+        # Kategorije su u results[0].categories ili results[0].food_categories
+        venue = data.get("results", [{}])[0] if data.get("results") else {}
+        cats = venue.get("categories", []) or venue.get("food_categories", []) or []
+        cuisines = []
+        for c in cats:
+            if isinstance(c, dict):
+                name = c.get("name") or c.get("title", "")
+                if name:
+                    cuisines.append(str(name))
+            elif isinstance(c, str) and c:
+                cuisines.append(c)
+        return cuisines
+    except Exception:
+        return []
+
 @st.cache_data(ttl=60)
 def fetch_wolt_data(lat, lon, city_slug):
     cols = ["Name", "Wolt Link", "Cuisine_Raw", "Cuisine_Details", "Lat", "Lon", "Status", "Online", "Rating", "Rating_Count"]
@@ -188,9 +212,29 @@ def fetch_wolt_data(lat, lon, city_slug):
                     continue
                     
         if restaurants:
-            # Debug: sačuvaj primer venue objekta za inspekciju
-            st.session_state['sample_venue_keys'] = list(restaurants[0].keys()) if restaurants else []
-            return pd.DataFrame(restaurants).drop_duplicates(subset=['Name'])
+            df_result = pd.DataFrame(restaurants).drop_duplicates(subset=['Name'])
+
+            # Fetchuj kuhinje za restorane koji ih nemaju (categories: [] u main API-ju)
+            needs_cuisine = df_result[df_result['Cuisine_Raw'].apply(lambda x: len(x) == 0)]
+            if not needs_cuisine.empty:
+                progress = st.empty()
+                progress.caption(f"🔍 Fetchujem kuhinje za {len(needs_cuisine)} restorana...")
+                cuisine_map = {}
+                for i, (idx, row) in enumerate(needs_cuisine.iterrows()):
+                    slug = row['Wolt Link'].split('/restaurant/')[-1].strip('/')
+                    if slug:
+                        cuisine_map[idx] = fetch_venue_categories(slug, headers)
+                    if i % 10 == 0:
+                        progress.caption(f"🔍 Fetchujem kuhinje... {i+1}/{len(needs_cuisine)}")
+                progress.empty()
+
+                for idx, cuisines in cuisine_map.items():
+                    if cuisines:
+                        df_result.at[idx, 'Cuisine_Raw'] = cuisines
+                        df_result.at[idx, 'Cuisine_Details'] = ", ".join(cuisines)
+
+            st.session_state['debug_venue_keys'] = {k: str(restaurants[0].get(k, ''))[:80] for k in restaurants[0].keys()} if restaurants else {}
+            return df_result
             
     except Exception as e:
         st.session_state['raw_api_debug'] = {"Fatalna greška": str(e)}
