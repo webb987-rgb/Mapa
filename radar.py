@@ -112,29 +112,30 @@ def fetch_venue_categories(slug, headers):
 
 @st.cache_data(ttl=300)
 def fetch_cuisine_map(lat, lon, category_slugs):
-    """Za svaku kategoriju fetchuj koji restorani joj pripadaju. Vraća {venue_slug: set(cuisines)}"""
+    """Za svaku kategoriju fetchuj koji restorani joj pripadaju."""
     slug_to_cuisines = {}
     url = "https://consumer-api.wolt.com/v1/pages/category/restaurants"
+    errors = []
     
-    for cat_slug, cat_title in category_slugs:
-        try:
-            payload = {
-                "lat": float(lat),
-                "lon": float(lon),
-                "filters": [{"section_slug": "category", "filter_slug": cat_slug}]
-            }
-            r = requests.post(url, json=payload, headers=WOLT_HEADERS, impersonate="chrome120", timeout=10)
-            if r.status_code != 200:
-                continue
-            data = r.json()
-            for section in data.get("sections", []):
-                for item in section.get("items", []):
-                    details = item.get("link", {}).get("menu_item_details", {})
-                    v_slug = details.get("venue_slug", "")
-                    if v_slug:
-                        slug_to_cuisines.setdefault(v_slug, set()).add(cat_title)
-        except Exception:
+    for cat_slug, cat_title in category_slugs[:3]:  # samo prvih 3 za test
+        payload = {
+            "lat": float(lat),
+            "lon": float(lon),
+            "filters": [{"section_slug": "category", "filter_slug": cat_slug}]
+        }
+        r = requests.post(url, json=payload, headers=WOLT_HEADERS, impersonate="chrome120", timeout=10)
+        errors.append(f"{cat_slug}: HTTP {r.status_code}, body[:100]={r.text[:100]}")
+        if r.status_code != 200:
             continue
+        data = r.json()
+        for section in data.get("sections", []):
+            for item in section.get("items", []):
+                details = item.get("link", {}).get("menu_item_details", {})
+                v_slug = details.get("venue_slug", "")
+                if v_slug:
+                    slug_to_cuisines.setdefault(v_slug, set()).add(cat_title)
+    
+    st.session_state['cuisine_debug'] = errors
     return slug_to_cuisines
 
 @st.cache_data(ttl=60)
@@ -397,10 +398,10 @@ with tab1:
         with st.expander("🗂️ Debug — struktura API sekcija"):
             if 'debug_sections' in st.session_state:
                 st.json(st.session_state['debug_sections'])
-            elif 'raw_api_debug' in st.session_state:
-                st.json(st.session_state['raw_api_debug'])
-            else:
-                st.warning("Nema debug podataka — klikni Force Refresh u sidebaru")
+            if 'cuisine_debug' in st.session_state:
+                st.subheader("Cuisine fetch status:")
+                for line in st.session_state['cuisine_debug']:
+                    st.code(line)
 
 # --- TAB 2: MARKET ANALYSIS ---
 with tab2:
