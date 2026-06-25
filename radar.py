@@ -210,7 +210,8 @@ def gsheets_configured():
         _ = st.secrets["gcp_service_account"]
         _ = st.secrets["google_sheets"]["spreadsheet_id"]
         return True
-    except Exception:
+    except Exception as e:
+        st.sidebar.error(f"Secrets greška: {e}")
         return False
 
 
