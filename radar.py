@@ -141,21 +141,19 @@ def fetch_wolt_data(lat, lon, city_slug):
         restaurants = []
         slug_to_cuisines = {}
 
-        # DEBUG: detaljna inspekcija
         sections = data.get("sections", [])
-        debug_sections = []
-        for i, sec in enumerate(sections[:8]):
-            items = sec.get("items", [])
-            first_item = items[0] if items else {}
-            debug_sections.append({
-                "index": i,
-                "name": sec.get("name", ""),
-                "title": sec.get("title", ""),
-                "num_items": len(items),
-                "first_item_FULL": first_item,  # pun sadržaj prvog item-a
-            })
-        st.session_state['debug_sections'] = debug_sections
-        st.session_state['raw_api_debug']['Sekcije (prvih 8)'] = debug_sections
+
+        # DEBUG: sekcija 0 = kategorije, sekcije 2+ = restorani po kategorijama
+        sec0_items = sections[0].get("items", []) if sections else []
+        sec2_items = sections[2].get("items", []) if len(sections) > 2 else []
+        st.session_state['debug_sections'] = {
+            "sec0_first3_items": sec0_items[:3],   # kategorije (Breakfast, Pizza...)
+            "sec2_first3_items": sec2_items[:3],   # restorani u prvoj kategoriji
+            "total_sections": len(sections),
+            "sec0_title": sections[0].get("title") if sections else "",
+            "sec2_title": sections[2].get("title") if len(sections) > 2 else "",
+        }
+        st.session_state['raw_api_debug']['debug'] = st.session_state['debug_sections']
 
         for section in data.get("sections", []):
             # Naziv kuhinje = title sekcije (npr. "Breakfast", "Pizza & Pasta"...)
