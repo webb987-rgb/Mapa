@@ -106,34 +106,14 @@ WOLT_HEADERS = {
 
 @st.cache_resource
 def get_gspread_client():
-    """
-    Ucitava Google service account credentials iz Streamlit secrets.
-    U secrets.toml dodaj:
-    
-    [gcp_service_account]
-    type = "service_account"
-    project_id = "..."
-    private_key_id = "..."
-    private_key = "-----BEGIN RSA PRIVATE KEY-----\n..."
-    client_email = "..."
-    client_id = "..."
-    auth_uri = "..."
-    token_uri = "..."
-    
-    [google_sheets]
-    spreadsheet_id = "1AbCdEfGhIjKlMnOpQrStUvWxYz..."
-    """
     try:
-        creds_dict = dict(st.secrets["gcp_service_account"])
-        scopes = [
-            "https://www.googleapis.com/auth/spreadsheets",
-            "https://www.googleapis.com/auth/drive",
-        ]
-        creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
-        client = gspread.authorize(creds)
+        import json as _json
+        raw = dict(st.secrets["gcp_service_account"])
+        creds_dict = _json.loads(_json.dumps(dict(raw)))
+        client = gspread.service_account_from_dict(creds_dict)
         return client
     except Exception as e:
-        st.sidebar.error(f"gspread auth greška: {e}")
+        st.sidebar.error(f"gspread auth greka: {e}")
         return None
 
 
@@ -649,8 +629,8 @@ with tab3:
             ]].copy()
             display = display.rename(columns={
                 "Name": "Restoran", "Online": "Status", "Cuisine_Details": "Kuhinja",
-                "Ocene_pre": f"Ocene ({prev_ts.strftime('%H:%M')})",
-                "Ocene_sada": f"Ocene ({curr_ts.strftime('%H:%M')})",
+                "Ocene_pre": f"Ocene_prije ({prev_ts.strftime('%d.%m %H:%M')})",
+                "Ocene_sada": f"Ocene_sada ({curr_ts.strftime('%d.%m %H:%M')})",
             })
             display["Status"] = display["Status"].apply(lambda x: "🟢" if x else "🔴")
 
