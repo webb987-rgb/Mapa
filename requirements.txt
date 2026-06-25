@@ -1,7 +1,8 @@
-curl_cffi
+streamlit
 pandas
-folium
-streamlit-folium
-geopy
-streamlit-autorefresh
-pytz
+numpy
+plotly
+requests
+playwright
+reportlab
+ 
