@@ -425,6 +425,29 @@ with tab1:
                 for line in st.session_state['cuisine_debug']:
                     st.code(line)
 
+        with st.expander("🔍 Debug — RAW item struktura (prvi restoran)"):
+            url = "https://consumer-api.wolt.com/v1/pages/category/restaurants"
+            payload = {"lat": float(st.session_state.lat), "lon": float(st.session_state.lon)}
+            r_dbg = requests.post(url, json=payload, headers=WOLT_HEADERS, impersonate="chrome120", timeout=15)
+            dbg_data = r_dbg.json()
+            dbg_sections = dbg_data.get("sections", [])
+
+            found = False
+            for section in dbg_sections:
+                for item in section.get("items", []):
+                    details = item.get("link", {}).get("menu_item_details", {})
+                    if details.get("venue_slug"):
+                        st.write("### menu_item_details:")
+                        st.json(details)
+                        st.write("### ceo item:")
+                        st.json(item)
+                        found = True
+                        break
+                if found:
+                    break
+            if not found:
+                st.warning("Nije pronađen nijedan item sa venue_slug.")
+
 # --- TAB 2: MARKET ANALYSIS ---
 with tab2:
     if df_main.empty:
