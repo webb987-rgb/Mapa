@@ -139,8 +139,19 @@ def fetch_wolt_data(lat, lon, city_slug):
             
         data = r.json()
         restaurants = []
-        
+        # dict: venue slug -> set of cuisine names (iz naslova sekcija)
+        slug_to_cuisines = {}
+
         for section in data.get("sections", []):
+            # Naziv kuhinje = title sekcije (npr. "Breakfast", "Pizza & Pasta"...)
+            # Preskačemo navigacione i "All Restaurants" sekcije
+            section_name = section.get("name", "")
+            section_title = section.get("title", "")
+
+            # Sekcije sa restoranima imaju name koji počinje sa "category-venue-and-items"
+            is_cuisine_section = "venue-and-items" in section_name or "venue-window" in section_name
+            cuisine_label = section_title.strip() if is_cuisine_section and section_title else ""
+
             venues_in_section = []
             
             # Putanja A: Klasična struktura (items -> venue)
@@ -155,6 +166,13 @@ def fetch_wolt_data(lat, lon, city_slug):
                     venues_in_section.append(sec_venue["venue"])
                 elif "slug" in sec_venue or "id" in sec_venue:
                     venues_in_section.append(sec_venue)
+
+            # Mapiraj slug -> kuhinja
+            if cuisine_label:
+                for item in venues_in_section:
+                    slug = item.get("slug", "")
+                    if slug:
+                        slug_to_cuisines.setdefault(slug, set()).add(cuisine_label)
             
             for v in venues_in_section:
                 try:
@@ -169,38 +187,13 @@ def fetch_wolt_data(lat, lon, city_slug):
                     rating_dict = v.get("rating") or {}
                     score = rating_dict.get("score", 0) if isinstance(rating_dict, dict) else 0
                     volume = rating_dict.get("volume", 0) if isinstance(rating_dict, dict) else 0
-                    
-                    cats = v.get("categories", []) or v.get("tags", []) or []
-                    if not cats and v.get("category"):
-                        cats = [{"name": v.get("category")}]
-                    cuisines = [str(c.get("name", c.get("title", ""))) for c in cats if isinstance(c, dict) and (c.get("name") or c.get("title"))]
 
-                    # Fallback: pokušaj iz "food_tags", "labels", "short_description"
-                    if not cuisines:
-                        for field in ["food_tags", "labels", "badge", "badges"]:
-                            extra = v.get(field, [])
-                            if isinstance(extra, list) and extra:
-                                for e in extra:
-                                    if isinstance(e, dict):
-                                        name = e.get("name") or e.get("title") or e.get("text", "")
-                                    else:
-                                        name = str(e)
-                                    if name:
-                                        cuisines.append(name)
-                                break
-                            elif isinstance(extra, str) and extra:
-                                cuisines.append(extra)
-                                break
-
-                    # Sačuvaj raw venue keys za debug (samo jednom)
-                    if 'debug_venue_keys' not in st.session_state:
-                        st.session_state['debug_venue_keys'] = {k: str(v.get(k))[:80] for k in v.keys()}
-                    
                     restaurants.append({
+                        "slug": v.get("slug", ""),
                         "Name": v.get("name", "Unknown"),
                         "Wolt Link": f"https://wolt.com/en/srb/{city_slug}/restaurant/{v.get('slug', '')}",
-                        "Cuisine_Raw": cuisines,
-                        "Cuisine_Details": ", ".join(cuisines) if cuisines else "Other",
+                        "Cuisine_Raw": [],  # popunjavamo posle
+                        "Cuisine_Details": "Other",
                         "Lat": v_lat,
                         "Lon": v_lon,
                         "Status": "Open 🟢" if v.get("online") else "Closed 🔴",
@@ -214,24 +207,17 @@ def fetch_wolt_data(lat, lon, city_slug):
         if restaurants:
             df_result = pd.DataFrame(restaurants).drop_duplicates(subset=['Name'])
 
-            # Fetchuj kuhinje za restorane koji ih nemaju (categories: [] u main API-ju)
-            needs_cuisine = df_result[df_result['Cuisine_Raw'].apply(lambda x: len(x) == 0)]
-            if not needs_cuisine.empty:
-                progress = st.empty()
-                progress.caption(f"🔍 Fetchujem kuhinje za {len(needs_cuisine)} restorana...")
-                cuisine_map = {}
-                for i, (idx, row) in enumerate(needs_cuisine.iterrows()):
-                    slug = row['Wolt Link'].split('/restaurant/')[-1].strip('/')
-                    if slug:
-                        cuisine_map[idx] = fetch_venue_categories(slug, headers)
-                    if i % 10 == 0:
-                        progress.caption(f"🔍 Fetchujem kuhinje... {i+1}/{len(needs_cuisine)}")
-                progress.empty()
+            # Primeni kuhinje iz sekcija
+            def assign_cuisines(row):
+                cuisines = sorted(slug_to_cuisines.get(row['slug'], set()))
+                return cuisines
 
-                for idx, cuisines in cuisine_map.items():
-                    if cuisines:
-                        df_result.at[idx, 'Cuisine_Raw'] = cuisines
-                        df_result.at[idx, 'Cuisine_Details'] = ", ".join(cuisines)
+            df_result['Cuisine_Raw'] = df_result.apply(assign_cuisines, axis=1)
+            df_result['Cuisine_Details'] = df_result['Cuisine_Raw'].apply(
+                lambda x: ", ".join(x) if x else "Other"
+            )
+            # Ukloni slug kolonu (interna)
+            df_result = df_result.drop(columns=['slug'], errors='ignore')
 
             st.session_state['debug_venue_keys'] = {k: str(restaurants[0].get(k, ''))[:80] for k in restaurants[0].keys()} if restaurants else {}
             return df_result
