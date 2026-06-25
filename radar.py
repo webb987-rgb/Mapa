@@ -60,6 +60,31 @@ def countdown_timer(minutes):
     """
     return components.html(html_code, height=120)
 
+# --- 3.5 WOLT API HEADERS (globalna konstanta) ---
+WOLT_HEADERS = {
+    "accept": "application/json, text/plain, */*",
+    "accept-language": "en-US,en;q=0.9,sr-RS;q=0.8,sr;q=0.7",
+    "app-currency-format": "wqQxLDIzNC41Ng==",
+    "app-language": "en",
+    "client-version": "1.16.109",
+    "clientversionnumber": "1.16.109",
+    "content-type": "application/json",
+    "origin": "https://wolt.com",
+    "platform": "Web",
+    "priority": "u=1, i",
+    "referer": "https://wolt.com/",
+    "sec-ch-ua": '"Chromium";v="148", "Google Chrome";v="148", "Not/A)Brand";v="99"',
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": '"Windows"',
+    "sec-fetch-dest": "empty",
+    "sec-fetch-mode": "cors",
+    "sec-fetch-site": "same-site",
+    "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36",
+    "w-wolt-session-id": "322cf981-a30b-460e-a2ad-9e2f2367718f",
+    "x-wolt-web-clientid": "6020ea5f-e8b8-428c-9dac-990e6762f56f",
+    "cookie": "ravelinDeviceId=rjs-e2022c3e-07d3-4c6a-910d-973b4273ee0d; rskxRunCookie=0; rCookie=df93ypr9eeqeubs3uxtx1emfgklyxr; cwc-consents={%22analytics%22:true%2C%22functional%22:true%2C%22interaction%22:{%22bundle%22:%22allow%22}%2C%22marketing%22:true%2C%22updatedAt%22:{%22bundle%22:%222025-09-12T08:23:42.245Z%22}%2C%22versions%22:{%22bundle%22:[%226f6e0a18-e3dd-43e8-9e57-7e09f6d90239%22%2C%224900fd93-1d29-4f54-b165-82d98b47c9ce%22]}}; _ga=GA1.1.827517620.1757665421; __woltUid=6020ea5f-e8b8-428c-9dac-990e6762f56f; _yjsu_yjad=1757665423.89251f19-e392-4f9e-94be-d7cff326a0c8; telemetryDeviceId=6020ea5f-e8b8-428c-9dac-990e6762f56f; cwc-language=en; telemetryDeviceId_=6020ea5f-e8b8-428c-9dac-990e6762f56f; __woltUid_=6020ea5f-e8b8-428c-9dac-990e6762f56f; _gcl_au=1.1.1458055390.1773648206.1177876118.1774621016.1774621016; AwinChannelCookie=other; lantern=939b559d-7f23-4458-a2b1-d2601b19309f; telemetrySessionId=322cf981-a30b-460e-a2ad-9e2f2367718f; telemetrySessionId_=322cf981-a30b-460e-a2ad-9e2f2367718f; ravelinSessionId=rjs-e2022c3e-07d3-4c6a-910d-973b4273ee0d:06d1f5f9-6e7a-4264-a4f9-99b8cd114c0a; _gcl_gs=2.1.k1$i1779963260$u76688403; _gcl_aw=GCL.1779963265.Cj0KCQjwz9_QBhD_ARIsADnSCfDeqxKXB1Xh9RUGVRwf7mnE4LxtVzbthvyJMJSSSM68xyX2uMVi284aAqGQEALw_wcB; lastRskxRun=1780321818344; __woltAnalyticsId=322cf981-a30b-460e-a2ad-9e2f2367718f; _clck=16dc31a%5E2%5Eg6l%5E1%5E2081; __woltAnalyticsId_=322cf981-a30b-460e-a2ad-9e2f2367718f; _uetsid=14770a105f4c11f1aeea8d5d251cb0b5; _uetvid=cb244d408fb111f09fee47d7a0c43d54; _clsk=1u3utsu%5E1780491736196%5E6%5E1%5Er.clarity.ms%2Fcollect; _ga_CP7Z2F7NFM=GS2.1.s1780491578$o207$g1$t1780491739$j42$l0$h0$dOez4uWLiHxGYv2sVVpAgv3oKDuyOb-XwGg"
+}
+
 # --- 4. DATA SCRAPER ---
 @st.cache_data(ttl=300)
 def fetch_venue_categories(slug, headers):
@@ -86,8 +111,8 @@ def fetch_venue_categories(slug, headers):
         return []
 
 @st.cache_data(ttl=300)
-def fetch_cuisine_map(lat, lon, headers, category_slugs):
-    """Za svaku kategoriju fetchuj koji restorani joj pripadaju. Vraća {venue_slug: [cuisine1, ...]}"""
+def fetch_cuisine_map(lat, lon, category_slugs):
+    """Za svaku kategoriju fetchuj koji restorani joj pripadaju. Vraća {venue_slug: set(cuisines)}"""
     slug_to_cuisines = {}
     url = "https://consumer-api.wolt.com/v1/pages/category/restaurants"
     
@@ -98,20 +123,16 @@ def fetch_cuisine_map(lat, lon, headers, category_slugs):
                 "lon": float(lon),
                 "filters": [{"section_slug": "category", "filter_slug": cat_slug}]
             }
-            r = requests.post(url, json=payload, headers=headers, impersonate="chrome120", timeout=10)
+            r = requests.post(url, json=payload, headers=WOLT_HEADERS, impersonate="chrome120", timeout=10)
             if r.status_code != 200:
                 continue
             data = r.json()
             for section in data.get("sections", []):
                 for item in section.get("items", []):
-                    # venue_slug je u link.menu_item_details.venue_slug
                     details = item.get("link", {}).get("menu_item_details", {})
                     v_slug = details.get("venue_slug", "")
                     if v_slug:
                         slug_to_cuisines.setdefault(v_slug, set()).add(cat_title)
-                    # ili direktno u menu_item
-                    details2 = item.get("menu_item", {})
-                    # venue_id dostupan ali ne slug — preskačemo
         except Exception:
             continue
     return slug_to_cuisines
@@ -123,41 +144,10 @@ def fetch_wolt_data(lat, lon, city_slug):
     
     # Novi endpoint identifikovan iz tvog cURL-a
     url = "https://consumer-api.wolt.com/v1/pages/category/restaurants"
-    
-    # Autentična zaglavlja i kolačići preslikani direktno iz tvog pretraživača
-    headers = {
-        "accept": "application/json, text/plain, */*",
-        "accept-language": "en-US,en;q=0.9,sr-RS;q=0.8,sr;q=0.7",
-        "app-currency-format": "wqQxLDIzNC41Ng==",
-        "app-language": "en",
-        "client-version": "1.16.109",
-        "clientversionnumber": "1.16.109",
-        "content-type": "application/json",
-        "origin": "https://wolt.com",
-        "platform": "Web",
-        "priority": "u=1, i",
-        "referer": "https://wolt.com/",
-        "sec-ch-ua": '"Chromium";v="148", "Google Chrome";v="148", "Not/A)Brand";v="99"',
-        "sec-ch-ua-mobile": "?0",
-        "sec-ch-ua-platform": '"Windows"',
-        "sec-fetch-dest": "empty",
-        "sec-fetch-mode": "cors",
-        "sec-fetch-site": "same-site",
-        "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36",
-        "w-wolt-session-id": "322cf981-a30b-460e-a2ad-9e2f2367718f",
-        "x-wolt-web-clientid": "6020ea5f-e8b8-428c-9dac-990e6762f56f",
-        "cookie": "ravelinDeviceId=rjs-e2022c3e-07d3-4c6a-910d-973b4273ee0d; rskxRunCookie=0; rCookie=df93ypr9eeqeubs3uxtx1emfgklyxr; cwc-consents={%22analytics%22:true%2C%22functional%22:true%2C%22interaction%22:{%22bundle%22:%22allow%22}%2C%22marketing%22:true%2C%22updatedAt%22:{%22bundle%22:%222025-09-12T08:23:42.245Z%22}%2C%22versions%22:{%22bundle%22:[%226f6e0a18-e3dd-43e8-9e57-7e09f6d90239%22%2C%224900fd93-1d29-4f54-b165-82d98b47c9ce%22]}}; _ga=GA1.1.827517620.1757665421; __woltUid=6020ea5f-e8b8-428c-9dac-990e6762f56f; _yjsu_yjad=1757665423.89251f19-e392-4f9e-94be-d7cff326a0c8; telemetryDeviceId=6020ea5f-e8b8-428c-9dac-990e6762f56f; cwc-language=en; telemetryDeviceId_=6020ea5f-e8b8-428c-9dac-990e6762f56f; __woltUid_=6020ea5f-e8b8-428c-9dac-990e6762f56f; _gcl_au=1.1.1458055390.1773648206.1177876118.1774621016.1774621016; AwinChannelCookie=other; lantern=939b559d-7f23-4458-a2b1-d2601b19309f; telemetrySessionId=322cf981-a30b-460e-a2ad-9e2f2367718f; telemetrySessionId_=322cf981-a30b-460e-a2ad-9e2f2367718f; ravelinSessionId=rjs-e2022c3e-07d3-4c6a-910d-973b4273ee0d:06d1f5f9-6e7a-4264-a4f9-99b8cd114c0a; _gcl_gs=2.1.k1$i1779963260$u76688403; _gcl_aw=GCL.1779963265.Cj0KCQjwz9_QBhD_ARIsADnSCfDeqxKXB1Xh9RUGVRwf7mnE4LxtVzbthvyJMJSSSM68xyX2uMVi284aAqGQEALw_wcB; lastRskxRun=1780321818344; __woltAnalyticsId=322cf981-a30b-460e-a2ad-9e2f2367718f; _clck=16dc31a%5E2%5Eg6l%5E1%5E2081; __woltAnalyticsId_=322cf981-a30b-460e-a2ad-9e2f2367718f; _uetsid=14770a105f4c11f1aeea8d5d251cb0b5; _uetvid=cb244d408fb111f09fee47d7a0c43d54; _clsk=1u3utsu%5E1780491736196%5E6%5E1%5Er.clarity.ms%2Fcollect; _ga_CP7Z2F7NFM=GS2.1.s1780491578$o207$g1$t1780491739$j42$l0$h0$dOez4uWLiHxGYv2sVVpAgv3oKDuyOb-XwGg"
-    }
-    
-    # JSON telo zahteva (Payload) umesto URL parametara
-    payload = {
-        "lat": float(lat),
-        "lon": float(lon)
-    }
+    payload = {"lat": float(lat), "lon": float(lon)}
     
     try:
-        # Prebacivanje na .post() metodu sa prosleđivanjem json payload-a
-        r = requests.post(url, json=payload, headers=headers, impersonate="chrome120", timeout=15)
+        r = requests.post(url, json=payload, headers=WOLT_HEADERS, impersonate="chrome120", timeout=15)
         
         st.session_state['raw_api_debug'] = {
             "HTTP Status Kod": r.status_code,
@@ -254,7 +244,7 @@ def fetch_wolt_data(lat, lon, city_slug):
         if category_slugs and restaurants:
             # Uzmi samo prvih 15 kategorija da ne bude presporo
             cats_to_fetch = category_slugs[:15]
-            slug_to_cuisines = fetch_cuisine_map(lat, lon, headers, tuple(cats_to_fetch))
+            slug_to_cuisines = fetch_cuisine_map(lat, lon, tuple(cats_to_fetch))
 
         st.session_state['debug_sections'] = {
             "kategorije_pronadjene": category_slugs[:10],
