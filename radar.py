@@ -23,12 +23,6 @@ import json
 # --- 1. CONFIGURATION & TIMEZONE ---
 st.set_page_config(page_title="Wolt BI Radar PRO v29.0", layout="wide", page_icon="📡")
 
-# DEBUG - obrisati nakon testiranja
-try:
-    st.sidebar.write("Secrets keys:", list(st.secrets.keys()))
-except Exception as e:
-    st.sidebar.error(f"Nema secrets: {e}")
-
 local_tz = pytz.timezone("Europe/Belgrade")
 
 CITIES = {
@@ -163,8 +157,8 @@ def save_to_gsheets(df, city):
 
 
 @st.cache_data(ttl=300)
-def load_from_gsheets(city):
-    """Ucitava historiju iz Google Sheets za dati grad."""
+def load_from_gsheets(city=None):
+    """Ucitava historiju iz Google Sheets. Ako je city=None, vraca sve gradove."""
     try:
         client = get_gspread_client()
         if client is None:
@@ -184,7 +178,7 @@ def load_from_gsheets(city):
         df['Rating_Count'] = pd.to_numeric(df['Rating_Count'], errors='coerce').fillna(0).astype(int)
         df['Rating'] = pd.to_numeric(df['Rating'], errors='coerce').fillna(0.0)
 
-        if 'city' in df.columns:
+        if city and 'city' in df.columns:
             df = df[df['city'] == city]
 
         return df
@@ -696,8 +690,8 @@ with tab4:
         **4. Restartuj app** — podaci će se automatski snimati svaki sat.
         """)
     else:
-        # Ručno snimanje
-        col_gs1, col_gs2 = st.columns([3, 1])
+        # Dugmad za snimanje
+        col_gs1, col_gs2, col_gs3 = st.columns([2, 1, 1])
         with col_gs2:
             if st.button("💾 Snimi snapshot sada", use_container_width=True):
                 if not df_raw.empty:
@@ -711,13 +705,40 @@ with tab4:
                 else:
                     st.warning("Nema podataka za snimanje.")
 
-            if st.button("🔄 Osvježi historiju", use_container_width=True):
+        with col_gs3:
+            if st.button("🌍 Snimi sve gradove", use_container_width=True):
+                progress = st.progress(0, text="Učitavam gradove...")
+                results = []
+                for i, (cname, cinfo) in enumerate(CITIES.items()):
+                    progress.progress((i) / len(CITIES), text=f"Skidam {cname}...")
+                    try:
+                        df_city = fetch_wolt_data(cinfo["coords"][0], cinfo["coords"][1], cinfo["slug"])
+                        if not df_city.empty:
+                            ok, msg = save_to_gsheets(df_city, cname)
+                            results.append(f"{'✅' if ok else '❌'} {cname}: {msg}")
+                        else:
+                            results.append(f"⚠️ {cname}: nema podataka")
+                    except Exception as e:
+                        results.append(f"❌ {cname}: {e}")
+                progress.progress(1.0, text="Gotovo!")
                 load_from_gsheets.clear()
-                st.rerun()
+                for r in results:
+                    st.write(r)
 
-        # Ucitaj historiju
+        if st.button("🔄 Osvježi historiju", use_container_width=True):
+            load_from_gsheets.clear()
+            st.rerun()
+
+        # Filter po gradu
         with st.spinner("Učitavam historiju iz Google Sheets..."):
-            gs_history = load_from_gsheets(city_name)
+            gs_history_all = load_from_gsheets()
+
+        if gs_history_all.empty:
+            gs_history = pd.DataFrame()
+        else:
+            available_cities = sorted(gs_history_all['city'].unique().tolist()) if 'city' in gs_history_all.columns else [city_name]
+            selected_city_history = st.selectbox("🏙️ Grad:", available_cities, index=available_cities.index(city_name) if city_name in available_cities else 0)
+            gs_history = gs_history_all[gs_history_all['city'] == selected_city_history].copy()
 
         if gs_history.empty:
             st.info("📭 Nema podataka u Google Sheets za ovaj grad. Pritisni 'Snimi snapshot sada' da počneš prikupljati podatke.")
@@ -740,6 +761,9 @@ with tab4:
             st.divider()
 
             # --- Filter restorana ---
+            if 'Name' not in gs_history.columns:
+                st.error(f"❌ Sheet nema ispravne kolone. Pronađene kolone: {list(gs_history.columns)}")
+                st.stop()
             all_restaurants = sorted(gs_history['Name'].unique().tolist())
             
             col_f1, col_f2 = st.columns([3, 1])
