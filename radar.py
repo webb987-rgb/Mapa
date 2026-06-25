@@ -146,8 +146,11 @@ def fetch_wolt_data(lat, lon, city_slug):
                     score = rating_dict.get("score", 0) if isinstance(rating_dict, dict) else 0
                     volume = rating_dict.get("volume", 0) if isinstance(rating_dict, dict) else 0
                     
-                    cats = v.get("categories", []) or []
-                    cuisines = [str(c.get("name")) for c in cats if isinstance(c, dict) and c.get("name")]
+                    cats = v.get("categories", []) or v.get("tags", []) or []
+                    # Probaj i "category" (singular) kao fallback
+                    if not cats and v.get("category"):
+                        cats = [{"name": v.get("category")}]
+                    cuisines = [str(c.get("name", c.get("title", ""))) for c in cats if isinstance(c, dict) and (c.get("name") or c.get("title"))]
                     
                     restaurants.append({
                         "Name": v.get("name", "Unknown"),
@@ -294,6 +297,10 @@ with tab2:
 
         if not unique_cats:
             st.warning("⚠️ Nema podataka o kuhinjama za trenutni skup restorana.")
+            with st.expander("🔍 Debug — šta API vraća za kuhinje?"):
+                sample = df_main[["Name", "Cuisine_Raw", "Cuisine_Details"]].head(10)
+                st.dataframe(sample, use_container_width=True)
+                st.caption("Ako je Cuisine_Raw prazna lista [] za sve, API ne vraća kategorije za ovaj grad/lokaciju.")
         else:
             selection = st.selectbox("🍽️ Filter by Cuisine:", ["All"] + unique_cats)
 
@@ -367,8 +374,8 @@ with tab3:
 
         # ── SLEDEĆI SCANOVI: poređenje prethodni vs trenutni ────────────────────
         else:
-            prev_ts = unique_timestamps[-2]
-            curr_ts = unique_timestamps[-1]
+            prev_ts = unique_timestamps[-1]   # poslednji sačuvani snapshot = "prethodni"
+            curr_ts = datetime.datetime.now(local_tz)  # uvek live vrednost, nikad NaT
 
             df_prev = h[h['timestamp'] == prev_ts][["Name", "Rating_Count"]].copy()
             df_prev = df_prev.rename(columns={"Rating_Count": "Ocene_pre"})
