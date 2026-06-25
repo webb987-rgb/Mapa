@@ -172,12 +172,41 @@ def fetch_wolt_data(lat, lon, city_slug):
         
     return empty_df
 
-def save_snapshot(df):
+def save_snapshot(df, city):
+    """Sačuvaj snapshot u fajl specifičan za grad."""
     if not df.empty:
-        df_save = df.copy()
-        if 'Cuisine_Raw' in df_save.columns: df_save = df_save.drop(columns=['Cuisine_Raw'])
+        df_save = df[["Name", "Rating_Count", "Rating", "Online", "Cuisine_Details"]].copy()
         df_save['timestamp'] = datetime.datetime.now(local_tz).strftime('%Y-%m-%d %H:%M:%S')
-        df_save.to_csv(DB_FILE, mode='a', header=not os.path.exists(DB_FILE), index=False, quoting=csv.QUOTE_ALL)
+        df_save['city'] = city
+        file_exists = os.path.exists(DB_FILE)
+        df_save.to_csv(DB_FILE, mode='a', header=not file_exists, index=False, quoting=csv.QUOTE_ALL)
+        return True
+    return False
+
+def load_history(city):
+    """Učitaj istoriju za određeni grad."""
+    if not os.path.exists(DB_FILE):
+        return pd.DataFrame()
+    try:
+        h = pd.read_csv(DB_FILE)
+        h['timestamp'] = pd.to_datetime(h['timestamp'])
+        h['Rating_Count'] = pd.to_numeric(h['Rating_Count'], errors='coerce').fillna(0).astype(int)
+        if 'city' in h.columns:
+            h = h[h['city'] == city]
+        return h
+    except Exception:
+        return pd.DataFrame()
+
+def auto_save_if_needed(df, city):
+    """Automatski sačuvaj snapshot ako je prošlo dovoljno vremena od poslednjeg."""
+    h = load_history(city)
+    now = datetime.datetime.now(local_tz)
+    if h.empty:
+        save_snapshot(df, city)
+        return True
+    last_ts = h['timestamp'].max()
+    if (now.replace(tzinfo=None) - last_ts.replace(tzinfo=None)) > datetime.timedelta(minutes=5):
+        save_snapshot(df, city)
         return True
     return False
 
@@ -207,6 +236,8 @@ df_main = df_raw.copy()
 if not df_raw.empty:
     if filter_status == "Open 🟢": df_main = df_raw[df_raw['Online'] == True]
     elif filter_status == "Closed 🔴": df_main = df_raw[df_raw['Online'] == False]
+    # Automatski sačuvaj snapshot pri svakom učitavanju (max jednom na 5 min)
+    auto_save_if_needed(df_raw, city_name)
 
 tab1, tab2, tab3, tab4 = st.tabs(["🟢 Radar", "📉 Market Analysis", "📈 Traffic Tracker", "☁️ Service Cloud"])
 
@@ -238,66 +269,163 @@ with tab1:
 
 # --- TAB 2: MARKET ANALYSIS ---
 with tab2:
-    if not df_main.empty:
-        flat_cats = [item for sublist in df_main['Cuisine_Raw'] for item in sublist]
+    if df_main.empty:
+        st.error("❌ Podaci nisu učitani.")
+    else:
+        # Flatten cuisine lists, skip empty
+        flat_cats = [item for sublist in df_main['Cuisine_Raw'] for item in sublist if item]
         unique_cats = sorted(list(set(flat_cats)))
-        selection = st.selectbox("Filter by Cuisine:", ["All"] + unique_cats)
-        df_f = df_main[df_main['Cuisine_Raw'].apply(lambda x: selection in x)] if selection != "All" else df_main
-        
-        m2 = folium.Map(location=[st.session_state.lat, st.session_state.lon], zoom_start=14)
-        for _, r in df_f.iterrows():
-            color = "green" if r['Online'] else "red"
-            folium.CircleMarker([r['Lat'], r['Lon']], radius=8, color=color, fill=True, tooltip=r['Name']).add_to(m2)
-        st_folium(m2, width="100%", height=500, key="m2")
+
+        if not unique_cats:
+            st.warning("⚠️ Nema podataka o kuhinjama za trenutni skup restorana.")
+        else:
+            selection = st.selectbox("🍽️ Filter by Cuisine:", ["All"] + unique_cats)
+
+            if selection != "All":
+                df_f = df_main[df_main['Cuisine_Raw'].apply(lambda x: selection in x if isinstance(x, list) else False)]
+            else:
+                df_f = df_main
+
+            # Metrics row
+            col1, col2, col3 = st.columns(3)
+            col1.metric("🏪 Ukupno restorana", len(df_f))
+            col2.metric("🟢 Otvoreni", len(df_f[df_f['Online'] == True]))
+            col3.metric("🔴 Zatvoreni", len(df_f[df_f['Online'] == False]))
+
+            # Map
+            m2 = folium.Map(location=[st.session_state.lat, st.session_state.lon], zoom_start=14)
+            for _, r in df_f.iterrows():
+                color = "green" if r['Online'] else "red"
+                folium.CircleMarker(
+                    [r['Lat'], r['Lon']], radius=8, color=color, fill=True,
+                    tooltip=f"{r['Name']} | {r['Cuisine_Details']}"
+                ).add_to(m2)
+            st_folium(m2, width="100%", height=500, key="m2")
+
+            # Table of filtered restaurants
+            st.subheader(f"📋 Restorani ({len(df_f)})")
+            st.dataframe(
+                df_f[["Name", "Status", "Rating", "Rating_Count", "Cuisine_Details", "Wolt Link"]],
+                use_container_width=True,
+                hide_index=True,
+                column_config={"Wolt Link": st.column_config.LinkColumn("Link")}
+            )
+
+            # Cuisine distribution chart (only when "All" selected)
+            if selection == "All" and flat_cats:
+                st.subheader("📊 Distribucija kuhinja")
+                from collections import Counter
+                cuisine_counts = Counter(flat_cats)
+                cuisine_df = pd.DataFrame(cuisine_counts.items(), columns=["Kuhinja", "Broj restorana"]).sort_values("Broj restorana", ascending=False).head(20)
+                st.bar_chart(cuisine_df.set_index("Kuhinja"))
 
 # --- TAB 3: TRAFFIC TRACKER ---
 with tab3:
     st.title("📈 Traffic Tracker")
-    if st.button("💾 SAVE CURRENT STATE TO ARCHIVE"):
-        save_snapshot(df_raw)
-        st.success("Snapshot saved successfully!")
-        st.rerun()
 
-    if os.path.exists(DB_FILE):
-        h = pd.read_csv(DB_FILE)
-        h = h.rename(columns={"Ime": "Name", "Broj_Ocena": "Rating_Count", "Ocena": "Rating"})
-        h['timestamp'] = pd.to_datetime(h['timestamp'])
-        
-        st.divider()
-        st.subheader("📅 Compare with History")
-        
-        available_dates = sorted(h['timestamp'].dt.date.unique(), reverse=True)
-        sel_date = st.date_input("1. Select Baseline Date:", value=available_dates[-1])
-        
-        day_snaps = h[h['timestamp'].dt.date == sel_date]
-        times = sorted(day_snaps['timestamp'].dt.time.unique())
-        
-        if len(times) > 0:
-            sel_time = st.selectbox("2. Select Baseline Time:", times)
-            baseline_ts = pd.to_datetime(f"{sel_date} {sel_time}")
-            latest_ts = h['timestamp'].max()
-            
-            if baseline_ts < latest_ts:
-                st.info(f"Analyzing from {baseline_ts.strftime('%H:%M')} to {latest_ts.strftime('%H:%M')}")
-                
-                df_pre = h[h['timestamp'] == baseline_ts].copy()
-                df_now = h[h['timestamp'] == latest_ts].copy()
-                
-                m = pd.merge(df_now, df_pre, on="Name", suffixes=('_now', '_pre'))
-                m['Rating_Count_now'] = pd.to_numeric(m['Rating_Count_now'], errors='coerce').fillna(0)
-                m['Rating_Count_pre'] = pd.to_numeric(m['Rating_Count_pre'], errors='coerce').fillna(0)
-                
-                m['Growth'] = m['Rating_Count_now'] - m['Rating_Count_pre']
-                m['Est_Orders'] = m['Growth'] * 10
-                
-                res = m[m['Growth'] > 0].sort_values(by='Growth', ascending=False)
-                if not res.empty:
-                    st.metric("Total Estimated New Orders", int(res['Est_Orders'].sum()))
-                    st.dataframe(res[["Name", "Growth", "Est_Orders", "Rating_now"]], use_container_width=True, hide_index=True)
-                else:
-                    st.warning("No change in ratings detected.")
+    if df_raw.empty:
+        st.error("❌ Nema podataka za prikaz.")
     else:
-        st.info("Archive is empty.")
+        h = load_history(city_name)
+        unique_timestamps = sorted(h['timestamp'].unique()) if not h.empty else []
+        num_scans = len(unique_timestamps)
+
+        # ── PRVI SCAN: samo prikaži tabelu ──────────────────────────────────────
+        if num_scans <= 1:
+            ts_label = unique_timestamps[0].strftime('%d.%m.%Y u %H:%M:%S') if num_scans == 1 else "upravo sada"
+            st.info(f"📋 **Ovo je prvi scan** — {ts_label}. Sledeći put kad se aplikacija učita ili osvježi, prikazaće se poređenje.")
+
+            display_df = df_raw[["Name", "Rating_Count", "Rating", "Online", "Cuisine_Details"]].copy()
+            display_df = display_df.rename(columns={
+                "Name": "Restoran",
+                "Rating_Count": "Broj ocena",
+                "Rating": "Ocena",
+                "Online": "Status",
+                "Cuisine_Details": "Kuhinja"
+            })
+            display_df["Status"] = display_df["Status"].apply(lambda x: "🟢 Otvoren" if x else "🔴 Zatvoren")
+            display_df = display_df.sort_values("Broj ocena", ascending=False)
+
+            st.subheader(f"📋 Svi restorani — {len(display_df)} ukupno")
+            st.dataframe(display_df, use_container_width=True, hide_index=True)
+
+        # ── SLEDEĆI SCANOVI: poređenje prethodni vs trenutni ────────────────────
+        else:
+            prev_ts = unique_timestamps[-2]
+            curr_ts = unique_timestamps[-1]
+
+            df_prev = h[h['timestamp'] == prev_ts][["Name", "Rating_Count"]].copy()
+            df_prev = df_prev.rename(columns={"Rating_Count": "Ocene_pre"})
+
+            df_curr = df_raw[["Name", "Rating_Count", "Rating", "Online", "Cuisine_Details"]].copy()
+            df_curr = df_curr.rename(columns={"Rating_Count": "Ocene_sada"})
+
+            merged = pd.merge(df_curr, df_prev, on="Name", how="left")
+            merged["Ocene_pre"] = merged["Ocene_pre"].fillna(0).astype(int)
+            merged["Ocene_sada"] = merged["Ocene_sada"].fillna(0).astype(int)
+            merged["Δ Ocena"] = merged["Ocene_sada"] - merged["Ocene_pre"]
+            merged["Est. narudžbi"] = merged["Δ Ocena"] * 10
+
+            # Novi restorani (nisu bili u prethodnom scanu)
+            new_restaurants = merged[merged["Ocene_pre"] == 0]["Name"].tolist()
+
+            # Metrike
+            total_new_orders = int(merged[merged["Δ Ocena"] > 0]["Est. narudžbi"].sum())
+            active_count = int((merged["Δ Ocena"] > 0).sum())
+
+            col1, col2, col3, col4 = st.columns(4)
+            col1.metric("🕐 Prethodni scan", prev_ts.strftime('%d.%m. %H:%M'))
+            col2.metric("🕐 Trenutni scan", curr_ts.strftime('%d.%m. %H:%M'))
+            col3.metric("📦 Est. novih narudžbi", total_new_orders)
+            col4.metric("🔥 Aktivnih restorana", active_count)
+
+            st.divider()
+
+            # Pripremi tabelu za prikaz
+            display = merged[[
+                "Name", "Online", "Cuisine_Details",
+                "Ocene_pre", "Ocene_sada", "Δ Ocena", "Est. narudžbi"
+            ]].copy()
+            display = display.rename(columns={
+                "Name": "Restoran",
+                "Online": "Status",
+                "Cuisine_Details": "Kuhinja",
+                "Ocene_pre": f"Ocene ({prev_ts.strftime('%H:%M')})",
+                "Ocene_sada": f"Ocene ({curr_ts.strftime('%H:%M')})",
+            })
+            display["Status"] = display["Status"].apply(lambda x: "🟢" if x else "🔴")
+
+            # Tabela sa svim restoranima, sortirano po rastu
+            st.subheader("📊 Poređenje svih restorana")
+            display_sorted = display.sort_values("Δ Ocena", ascending=False)
+
+            # Kolorna oznaka rasta
+            def highlight_growth(val):
+                if isinstance(val, (int, float)):
+                    if val > 0: return 'background-color: #d4edda; color: #155724'
+                    elif val < 0: return 'background-color: #f8d7da; color: #721c24'
+                return ''
+
+            st.dataframe(
+                display_sorted,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Δ Ocena": st.column_config.NumberColumn("Δ Ocena", format="%+d"),
+                    "Est. narudžbi": st.column_config.NumberColumn("Est. narudžbi", format="%+d"),
+                }
+            )
+
+            if new_restaurants:
+                st.info(f"🆕 **Novi restorani od poslednjeg scana:** {', '.join(new_restaurants[:10])}" +
+                        (f" i još {len(new_restaurants)-10}" if len(new_restaurants) > 10 else ""))
+
+            # Dugme za ručni export
+            st.divider()
+            if st.button("💾 Preuzmi istoriju kao CSV"):
+                full_h = load_history(city_name)
+                csv_data = full_h.to_csv(index=False).encode('utf-8')
+                st.download_button("⬇️ Preuzmi radar_history.csv", csv_data, "radar_history.csv", "text/csv")
 
 # --- TAB 4: SERVICE CLOUD ---
 with tab4:
