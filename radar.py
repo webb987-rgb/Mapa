@@ -583,6 +583,80 @@ with tab1:
                 st.stop()
             all_restaurants = sorted(gs_history['Name'].unique().tolist())
 
+            # =====================================================
+            # KALENDAR — PRVO NA VRHU (prije filtera restorana)
+            # =====================================================
+            st.subheader("🗓️ Kalendar — nove ocjene po danu")
+
+            df_cal = gs_history.copy()
+            df_cal['date'] = df_cal['timestamp'].dt.date
+
+            daily_max_cal = df_cal.groupby(['date', 'Name'])['Rating_Count'].max()
+            daily_min_cal = df_cal.groupby(['date', 'Name'])['Rating_Count'].min()
+            daily_delta = (daily_max_cal - daily_min_cal).reset_index()
+            daily_delta.columns = ['date', 'Name', 'delta']
+
+            cal_data = daily_delta.groupby('date')['delta'].sum().reset_index()
+            cal_data['date'] = pd.to_datetime(cal_data['date'])
+            cal_data = cal_data.sort_values('date')
+
+            if cal_data.empty or cal_data['delta'].sum() == 0:
+                st.info("Nema dovoljno podataka za kalendar — potrebno je bar 2 snimka u istom danu.")
+            else:
+                import calendar
+                cal_data['year'] = cal_data['date'].dt.year
+                cal_data['month'] = cal_data['date'].dt.month
+                cal_data['day'] = cal_data['date'].dt.day
+                cal_data['weekday'] = cal_data['date'].dt.weekday
+                cal_data['month_name'] = cal_data['date'].dt.strftime('%B %Y')
+                cal_data['label'] = cal_data['delta'].apply(lambda x: f"+{int(x):,}" if x > 0 else "0")
+
+                for month_name, month_df in cal_data.groupby('month_name', sort=False):
+                    st.markdown(f"**{month_name}**")
+
+                    year = month_df['year'].iloc[0]
+                    month = month_df['month'].iloc[0]
+                    _, num_days = calendar.monthrange(year, month)
+                    first_weekday = calendar.monthrange(year, month)[0]
+
+                    day_map = {row['day']: (row['delta'], row['label']) for _, row in month_df.iterrows()}
+
+                    days_header = ['Pon', 'Uto', 'Sri', 'Čet', 'Pet', 'Sub', 'Ned']
+                    html = '<table style="border-collapse:collapse;width:100%;font-family:sans-serif;font-size:13px;">'
+                    html += '<tr>' + ''.join(f'<th style="text-align:center;padding:6px;color:#888;">{d}</th>' for d in days_header) + '</tr>'
+
+                    day = 1
+                    week_cells = ['<td></td>'] * first_weekday
+                    while day <= num_days:
+                        delta_val, label = day_map.get(day, (0, ''))
+                        max_delta = max((v for v, _ in day_map.values()), default=1) or 1
+                        intensity = min(int((delta_val / max_delta) * 200), 200) if delta_val > 0 else 0
+                        bg = f"rgb({255-intensity//2}, {255-intensity//4}, {255-intensity})" if delta_val > 0 else "#f5f5f5"
+                        text_color = "#1a1a2e" if intensity < 120 else "#fff"
+                        cell = f"""<td style="border:1px solid #e0e0e0;border-radius:6px;padding:8px 4px;text-align:center;background:{bg};min-width:40px;">
+                            <div style="font-weight:bold;color:#333;">{day}</div>
+                            <div style="color:{text_color};font-size:11px;font-weight:600;">{label}</div>
+                        </td>"""
+                        week_cells.append(cell)
+                        if len(week_cells) == 7:
+                            html += '<tr>' + ''.join(week_cells) + '</tr>'
+                            week_cells = []
+                        day += 1
+
+                    if week_cells:
+                        while len(week_cells) < 7:
+                            week_cells.append('<td></td>')
+                        html += '<tr>' + ''.join(week_cells) + '</tr>'
+
+                    html += '</table>'
+                    st.markdown(html, unsafe_allow_html=True)
+                    st.markdown("<br>", unsafe_allow_html=True)
+
+            st.divider()
+
+            # =====================================================
+            # FILTER RESTORANA — ispod kalendara
+            # =====================================================
             col_f1, col_f2 = st.columns([3, 1])
             with col_f1:
                 selected_restaurants = st.multiselect(
@@ -600,80 +674,9 @@ with tab1:
                 df_filtered = gs_history[gs_history['Name'].isin(selected_restaurants)].copy()
 
                 # =====================================================
-                # KALENDAR — PRVO NA VRHU
-                # =====================================================
-                st.subheader("🗓️ Kalendar — nove ocjene po danu")
-
-                df_cal = gs_history.copy()
-                df_cal['date'] = df_cal['timestamp'].dt.date
-
-                daily_max = df_cal.groupby(['date', 'Name'])['Rating_Count'].max()
-                daily_min = df_cal.groupby(['date', 'Name'])['Rating_Count'].min()
-                daily_delta = (daily_max - daily_min).reset_index()
-                daily_delta.columns = ['date', 'Name', 'delta']
-
-                cal_data = daily_delta.groupby('date')['delta'].sum().reset_index()
-                cal_data['date'] = pd.to_datetime(cal_data['date'])
-                cal_data = cal_data.sort_values('date')
-
-                if cal_data.empty or cal_data['delta'].sum() == 0:
-                    st.info("Nema dovoljno podataka za kalendar — potrebno je bar 2 snimka u istom danu.")
-                else:
-                    cal_data['year'] = cal_data['date'].dt.year
-                    cal_data['month'] = cal_data['date'].dt.month
-                    cal_data['day'] = cal_data['date'].dt.day
-                    cal_data['weekday'] = cal_data['date'].dt.weekday
-                    cal_data['month_name'] = cal_data['date'].dt.strftime('%B %Y')
-                    cal_data['label'] = cal_data['delta'].apply(lambda x: f"+{int(x):,}" if x > 0 else "0")
-
-                    for month_name, month_df in cal_data.groupby('month_name', sort=False):
-                        st.markdown(f"**{month_name}**")
-
-                        import calendar
-                        year = month_df['year'].iloc[0]
-                        month = month_df['month'].iloc[0]
-                        _, num_days = calendar.monthrange(year, month)
-                        first_weekday = calendar.monthrange(year, month)[0]
-
-                        day_map = {row['day']: (row['delta'], row['label']) for _, row in month_df.iterrows()}
-
-                        days_header = ['Pon', 'Uto', 'Sri', 'Čet', 'Pet', 'Sub', 'Ned']
-                        html = '<table style="border-collapse:collapse;width:100%;font-family:sans-serif;font-size:13px;">'
-                        html += '<tr>' + ''.join(f'<th style="text-align:center;padding:6px;color:#888;">{d}</th>' for d in days_header) + '</tr>'
-
-                        day = 1
-                        week_cells = ['<td></td>'] * first_weekday
-                        while day <= num_days:
-                            delta_val, label = day_map.get(day, (0, ''))
-                            max_delta = max((v for v, _ in day_map.values()), default=1) or 1
-                            intensity = min(int((delta_val / max_delta) * 200), 200) if delta_val > 0 else 0
-                            bg = f"rgb({255-intensity//2}, {255-intensity//4}, {255-intensity})" if delta_val > 0 else "#f5f5f5"
-                            text_color = "#1a1a2e" if intensity < 120 else "#fff"
-                            cell = f"""<td style="border:1px solid #e0e0e0;border-radius:6px;padding:8px 4px;text-align:center;background:{bg};min-width:40px;">
-                                <div style="font-weight:bold;color:#333;">{day}</div>
-                                <div style="color:{text_color};font-size:11px;font-weight:600;">{label}</div>
-                            </td>"""
-                            week_cells.append(cell)
-                            if len(week_cells) == 7:
-                                html += '<tr>' + ''.join(week_cells) + '</tr>'
-                                week_cells = []
-                            day += 1
-
-                        if week_cells:
-                            while len(week_cells) < 7:
-                                week_cells.append('<td></td>')
-                            html += '<tr>' + ''.join(week_cells) + '</tr>'
-
-                        html += '</table>'
-                        st.markdown(html, unsafe_allow_html=True)
-                        st.markdown("<br>", unsafe_allow_html=True)
-
-                st.divider()
-
-                # =====================================================
                 # LINE CHART
                 # =====================================================
-                daily_avg = df_filtered.groupby(['date', 'Name'])['Rating_Count'].mean().reset_index()
+                daily_avg = df_filtered.groupby(['date', 'Name'])['Rating_Count'].max().reset_index()
                 daily_avg.columns = ['Datum', 'Restoran', 'Ocjena_Count']
                 daily_avg['Datum'] = pd.to_datetime(daily_avg['Datum'])
                 daily_avg = daily_avg.sort_values('Datum')
