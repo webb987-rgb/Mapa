@@ -268,12 +268,24 @@ def fetch_venue_list(lat, lon, city_slug):
                     "Rating_Count": int(volume),
                 }
 
+        # Dump svih kljuceva prvog venue objekta da vidimo strukturu API-ja
+        first_venue_keys = {}
+        for section in sections:
+            for item in section.get("items", []):
+                v = item.get("venue")
+                if v and isinstance(v, dict):
+                    first_venue_keys = {k: str(v[k])[:200] for k in v.keys()}
+                    break
+            if first_venue_keys:
+                break
+
         st.session_state['debug_sections'] = {
             "endpoint": url,
             "broj_sekcija": len(sections),
             "restorana_pronadjeno": len(venue_map),
             "online": sum(1 for v in venue_map.values() if v["Online"]),
             "offline": sum(1 for v in venue_map.values() if not v["Online"]),
+            "prvi_venue_kljucevi": first_venue_keys,
         }
 
         if venue_map:
