@@ -112,14 +112,12 @@ def get_gspread_client():
 
 
 def get_or_create_worksheet(client, spreadsheet_id, worksheet_name):
-    """Otvara ili kreira worksheet u spreadsheetu."""
     try:
         sh = client.open_by_key(spreadsheet_id)
         try:
             ws = sh.worksheet(worksheet_name)
         except gspread.WorksheetNotFound:
             ws = sh.add_worksheet(title=worksheet_name, rows=10000, cols=10)
-            # Header row
             ws.append_row(["timestamp", "city", "Name", "Rating_Count", "Rating", "Online", "Cuisine_Details"])
         return ws
     except Exception as e:
@@ -127,7 +125,6 @@ def get_or_create_worksheet(client, spreadsheet_id, worksheet_name):
 
 
 def save_to_gsheets(df, city):
-    """Snima snapshot u Google Sheets. Vraca True ako uspje."""
     try:
         client = get_gspread_client()
         if client is None:
@@ -158,7 +155,6 @@ def save_to_gsheets(df, city):
 
 @st.cache_data(ttl=300)
 def load_from_gsheets(city=None):
-    """Ucitava historiju iz Google Sheets. Ako je city=None, vraca sve gradove."""
     try:
         client = get_gspread_client()
         if client is None:
@@ -198,7 +194,7 @@ def gsheets_configured():
 
 # --- 5. DATA SCRAPER ---
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=300)
 def fetch_venue_list(lat, lon, city_slug):
     cols = ["Name", "Wolt Link", "Cuisine_Raw", "Cuisine_Details",
             "Lat", "Lon", "Status", "Online", "Rating", "Rating_Count"]
@@ -272,12 +268,24 @@ def fetch_venue_list(lat, lon, city_slug):
                     "Rating_Count": int(volume),
                 }
 
+        # Dump svih kljuceva prvog venue objekta da vidimo strukturu API-ja
+        first_venue_keys = {}
+        for section in sections:
+            for item in section.get("items", []):
+                v = item.get("venue")
+                if v and isinstance(v, dict):
+                    first_venue_keys = {k: str(v[k])[:200] for k in v.keys()}
+                    break
+            if first_venue_keys:
+                break
+
         st.session_state['debug_sections'] = {
             "endpoint": url,
             "broj_sekcija": len(sections),
             "restorana_pronadjeno": len(venue_map),
             "online": sum(1 for v in venue_map.values() if v["Online"]),
             "offline": sum(1 for v in venue_map.values() if not v["Online"]),
+            "prvi_venue_kljucevi": first_venue_keys,
         }
 
         if venue_map:
@@ -290,7 +298,7 @@ def fetch_venue_list(lat, lon, city_slug):
     return empty_df
 
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=300)
 def fetch_wolt_data(lat, lon, city_slug):
     cols = ["Name", "Wolt Link", "Cuisine_Raw", "Cuisine_Details",
             "Lat", "Lon", "Status", "Online", "Rating", "Rating_Count"]
@@ -401,7 +409,6 @@ def parse_cuisine_raw(val):
 
 
 def df_hash(df):
-    """Pravi hash od DataFrame-a da bi izbjegao nepotreban re-render mape."""
     if df.empty:
         return "empty"
     return hashlib.md5(pd.util.hash_pandas_object(df[["Name", "Online"]]).to_json().encode()).hexdigest()[:12]
@@ -432,7 +439,6 @@ if st.session_state.timer_active:
     countdown_timer(refresh_min)
     st_autorefresh(interval=refresh_min * 60000, key="global_refresh")
 
-# Google Sheets status u sidebaru
 st.sidebar.markdown("---")
 if gsheets_configured():
     st.sidebar.success("🔗 Google Sheets: Aktivan")
@@ -454,120 +460,310 @@ if not df_raw.empty:
         df_main = df_raw[df_raw['Online'] == False]
     auto_save_if_needed(df_raw, city_name)
 
-    # Auto-save u Google Sheets (samo jednom po sesiji, ne na svaki rerun)
     if gsheets_configured():
         gs_key = f"gs_saved_{city_name}_{datetime.datetime.now(local_tz).strftime('%Y-%m-%d_%H')}"
         if gs_key not in st.session_state:
             ok, msg = save_to_gsheets(df_raw, city_name)
             st.session_state[gs_key] = msg
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs(["🟢 Radar", "📉 Market Analysis", "📈 Traffic Tracker", "📊 Rating History", "☁️ Service Cloud"])
+# =============================================================================
+# TABS — novi redosled:
+# 1. 📊 Rating History
+# 2. 📈 Traffic
+# 3. 📉 Traffic Tracker
+# 4. 🔍 Market Analysis
+# 5. 🟢 Radar
+# 6. ☁️ Service Cloud
+# =============================================================================
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+    "📊 Rating History",
+    "📈 Traffic",
+    "📉 Traffic Tracker",
+    "🔍 Market Analysis",
+    "🟢 Radar",
+    "☁️ Service Cloud"
+])
 
-# --- TAB 1: RADAR ---
+# --- TAB 1: RATING HISTORY (Google Sheets) ---
 with tab1:
-    if df_main.empty:
-        st.error("❌ Podaci nisu učitani.")
-        if 'raw_api_debug' in st.session_state:
-            st.json(st.session_state['raw_api_debug'])
+    st.title("📊 Rating History — Google Sheets")
+
+    if not gsheets_configured():
+        st.error("❌ Google Sheets nije konfigurisan.")
+        st.markdown("""
+        ### Kako podesiti Google Sheets integraciju:
+
+        **1. Kreiraj Google Service Account**
+        - Idi na [Google Cloud Console](https://console.cloud.google.com/)
+        - Kreiraj novi projekat (ili koristi postojeći)
+        - Omogući **Google Sheets API** i **Google Drive API**
+        - Idi na *IAM & Admin → Service Accounts → Create*
+        - Preuzmi JSON ključ (Download JSON)
+
+        **2. Kreiraj Google Sheet**
+        - Napravi novi spreadsheet na [sheets.google.com](https://sheets.google.com)
+        - Podijeli sheet sa email adresom service accounta (kao Editor)
+        - Kopiraj Sheet ID iz URL-a (dio između `/d/` i `/edit`)
+
+        **3. Dodaj secrets u `.streamlit/secrets.toml`**
+        ```toml
+        [gcp_service_account]
+        type = "service_account"
+        project_id = "tvoj-project-id"
+        private_key_id = "abc123..."
+        private_key = "-----BEGIN RSA PRIVATE KEY-----\\nMIIE...\\n-----END RSA PRIVATE KEY-----\\n"
+        client_email = "ime@project.iam.gserviceaccount.com"
+        client_id = "123456789"
+        auth_uri = "https://accounts.google.com/o/oauth2/auth"
+        token_uri = "https://oauth2.googleapis.com/token"
+
+        [google_sheets]
+        spreadsheet_id = "1AbCdEfGhIjKlMnOpQrStUvWxYz"
+        ```
+
+        **4. Restartuj app** — podaci će se automatski snimati svaki sat.
+        """)
     else:
-        col_m1, col_m2 = st.columns(2)
-        col_m1.metric("Open 🟢", len(df_main[df_main['Online'] == True]))
-        col_m2.metric("Closed 🔴", len(df_main[df_main['Online'] == False]))
+        col_gs1, col_gs2, col_gs3 = st.columns([2, 1, 1])
+        with col_gs2:
+            if st.button("💾 Snimi snapshot sada", use_container_width=True):
+                if not df_raw.empty:
+                    with st.spinner("Snimam u Google Sheets..."):
+                        ok, msg = save_to_gsheets(df_raw, city_name)
+                        if ok:
+                            st.success(msg)
+                            load_from_gsheets.clear()
+                        else:
+                            st.error(msg)
+                else:
+                    st.warning("Nema podataka za snimanje.")
 
-        # --- FIX TREPERENJA: render mape samo ako su se podaci promijenili ---
-        current_hash = df_hash(df_main)
-        render_key = f"m1_{current_hash}_{st.session_state.lat:.4f}_{st.session_state.lon:.4f}"
+        with col_gs3:
+            if st.button("🌍 Snimi sve gradove", use_container_width=True):
+                progress = st.progress(0, text="Učitavam gradove...")
+                results = []
+                for i, (cname, cinfo) in enumerate(CITIES.items()):
+                    progress.progress((i) / len(CITIES), text=f"Skidam {cname}...")
+                    try:
+                        df_city = fetch_wolt_data(cinfo["coords"][0], cinfo["coords"][1], cinfo["slug"])
+                        if not df_city.empty:
+                            ok, msg = save_to_gsheets(df_city, cname)
+                            results.append(f"{'✅' if ok else '❌'} {cname}: {msg}")
+                        else:
+                            results.append(f"⚠️ {cname}: nema podataka")
+                    except Exception as e:
+                        results.append(f"❌ {cname}: {e}")
+                progress.progress(1.0, text="Gotovo!")
+                load_from_gsheets.clear()
+                for r in results:
+                    st.write(r)
 
-        m1 = folium.Map(location=[st.session_state.lat, st.session_state.lon], zoom_start=14)
-        folium.Marker(
-            [st.session_state.lat, st.session_state.lon],
-            icon=folium.Icon(color='blue', icon='home')
-        ).add_to(m1)
-        for _, row in df_main.iterrows():
-            color = "green" if row['Online'] else "red"
-            folium.CircleMarker(
-                [row['Lat'], row['Lon']], radius=7, color=color, fill=True,
-                tooltip=f"{row['Name']} | {row['Status']}"
-            ).add_to(m1)
-
-        map_resp = st_folium(m1, width="100%", height=500, key=render_key, returned_objects=["last_clicked"])
-        if map_resp and map_resp.get("last_clicked"):
-            st.session_state.lat = map_resp["last_clicked"]["lat"]
-            st.session_state.lon = map_resp["last_clicked"]["lng"]
-            st.cache_data.clear()
+        if st.button("🔄 Osvježi historiju", use_container_width=True):
+            load_from_gsheets.clear()
             st.rerun()
 
-        st.dataframe(
-            df_main[["Name", "Status", "Rating", "Rating_Count", "Cuisine_Details", "Wolt Link"]],
-            use_container_width=True,
-            hide_index=True,
-            column_config={"Wolt Link": st.column_config.LinkColumn("Link")}
-        )
+        with st.spinner("Učitavam historiju iz Google Sheets..."):
+            gs_history_all = load_from_gsheets()
 
-        with st.expander("🗂️ Debug — API info"):
-            if 'debug_sections' in st.session_state:
-                st.json(st.session_state['debug_sections'])
-            if 'raw_api_debug' in st.session_state:
-                st.json(st.session_state['raw_api_debug'])
-
-# --- TAB 2: MARKET ANALYSIS ---
-with tab2:
-    if df_main.empty:
-        st.error("❌ Podaci nisu učitani.")
-    else:
-        flat_cats = [item for sublist in df_main['Cuisine_Raw'] for item in sublist if item]
-        unique_cats = sorted(list(set(flat_cats)))
-
-        if not unique_cats:
-            st.warning("⚠️ Nema podataka o kuhinjama.")
-            st.dataframe(df_main[["Name", "Cuisine_Raw", "Cuisine_Details"]].head(10), use_container_width=True)
+        if gs_history_all.empty:
+            gs_history = pd.DataFrame()
         else:
-            selection = st.selectbox("🍽️ Filter by Cuisine:", ["All"] + unique_cats)
+            available_cities = sorted(gs_history_all['city'].unique().tolist()) if 'city' in gs_history_all.columns else [city_name]
+            selected_city_history = st.selectbox("🏙️ Grad:", available_cities, index=available_cities.index(city_name) if city_name in available_cities else 0)
+            gs_history = gs_history_all[gs_history_all['city'] == selected_city_history].copy()
 
-            df_f = df_main
-            if selection != "All":
-                df_f = df_main[df_main['Cuisine_Raw'].apply(
-                    lambda x: selection in x if isinstance(x, list) else False
-                )]
+        if gs_history.empty:
+            st.info("📭 Nema podataka u Google Sheets za ovaj grad. Pritisni 'Snimi snapshot sada' da počneš prikupljati podatke.")
+        else:
+            gs_history['date'] = gs_history['timestamp'].dt.date
 
-            col1, col2, col3 = st.columns(3)
-            col1.metric("🏪 Ukupno restorana", len(df_f))
-            col2.metric("🟢 Otvoreni", len(df_f[df_f['Online'] == True]))
-            col3.metric("🔴 Zatvoreni", len(df_f[df_f['Online'] == False]))
+            first_date = gs_history['date'].min()
+            last_date = gs_history['date'].max()
+            unique_days = gs_history['date'].nunique()
+            total_records = len(gs_history)
 
-            map2_hash = df_hash(df_f)
-            m2 = folium.Map(location=[st.session_state.lat, st.session_state.lon], zoom_start=14)
-            for _, row in df_f.iterrows():
-                color = "green" if row['Online'] else "red"
-                folium.CircleMarker(
-                    [row['Lat'], row['Lon']], radius=8, color=color, fill=True,
-                    tooltip=f"{row['Name']} | {row['Cuisine_Details']}"
-                ).add_to(m2)
-            st_folium(m2, width="100%", height=500, key=f"m2_{map2_hash}_{selection}", returned_objects=[])
+            cm1, cm2, cm3, cm4 = st.columns(4)
+            cm1.metric("📅 Praćenje od", str(first_date))
+            cm2.metric("📅 Posljednji dan", str(last_date))
+            cm3.metric("📆 Broj dana", unique_days)
+            cm4.metric("📝 Ukupno zapisa", total_records)
 
-            st.subheader(f"📋 Restorani ({len(df_f)})")
-            st.dataframe(
-                df_f[["Name", "Status", "Rating", "Rating_Count", "Cuisine_Details", "Wolt Link"]],
-                use_container_width=True,
-                hide_index=True,
-                column_config={"Wolt Link": st.column_config.LinkColumn("Link")}
-            )
+            st.divider()
 
-            if selection == "All" and flat_cats:
-                st.subheader("📊 Distribucija kuhinja")
-                from collections import Counter
-                cuisine_counts = Counter(flat_cats)
-                cuisine_df = pd.DataFrame(
-                    cuisine_counts.items(), columns=["Kuhinja", "Broj restorana"]
-                ).sort_values("Broj restorana", ascending=False).head(20)
-                fig = px.bar(cuisine_df, x="Kuhinja", y="Broj restorana",
-                             color="Broj restorana", color_continuous_scale="Blues")
-                fig.update_layout(showlegend=False, height=400)
-                st.plotly_chart(fig, use_container_width=True)
+            if 'Name' not in gs_history.columns:
+                st.error(f"❌ Sheet nema ispravne kolone. Pronađene kolone: {list(gs_history.columns)}")
+                st.stop()
+            all_restaurants = sorted(gs_history['Name'].unique().tolist())
 
-# --- TAB 3: TRAFFIC TRACKER ---
-with tab3:
-    st.title("📈 Traffic Tracker")
+            # =====================================================
+            # KALENDAR — PRVO NA VRHU (prije filtera restorana)
+            # =====================================================
+            st.subheader("🗓️ Kalendar — nove ocjene po danu")
+
+            df_cal = gs_history.copy()
+            df_cal['date'] = df_cal['timestamp'].dt.date
+
+            daily_max_cal = df_cal.groupby(['date', 'Name'])['Rating_Count'].max()
+            daily_min_cal = df_cal.groupby(['date', 'Name'])['Rating_Count'].min()
+            daily_delta = (daily_max_cal - daily_min_cal).reset_index()
+            daily_delta.columns = ['date', 'Name', 'delta']
+
+            cal_data = daily_delta.groupby('date')['delta'].sum().reset_index()
+            cal_data['date'] = pd.to_datetime(cal_data['date'])
+            cal_data = cal_data.sort_values('date')
+
+            if cal_data.empty or cal_data['delta'].sum() == 0:
+                st.info("Nema dovoljno podataka za kalendar — potrebno je bar 2 snimka u istom danu.")
+            else:
+                import calendar
+                cal_data['year'] = cal_data['date'].dt.year
+                cal_data['month'] = cal_data['date'].dt.month
+                cal_data['day'] = cal_data['date'].dt.day
+                cal_data['weekday'] = cal_data['date'].dt.weekday
+                cal_data['month_name'] = cal_data['date'].dt.strftime('%B %Y')
+                cal_data['label'] = cal_data['delta'].apply(lambda x: f"+{int(x):,}" if x > 0 else "0")
+
+                for month_name, month_df in cal_data.groupby('month_name', sort=False):
+                    st.markdown(f"**{month_name}**")
+
+                    year = month_df['year'].iloc[0]
+                    month = month_df['month'].iloc[0]
+                    _, num_days = calendar.monthrange(year, month)
+                    first_weekday = calendar.monthrange(year, month)[0]
+
+                    day_map = {row['day']: (row['delta'], row['label']) for _, row in month_df.iterrows()}
+
+                    days_header = ['Pon', 'Uto', 'Sri', 'Čet', 'Pet', 'Sub', 'Ned']
+                    html = '<table style="border-collapse:collapse;width:100%;font-family:sans-serif;font-size:13px;">'
+                    html += '<tr>' + ''.join(f'<th style="text-align:center;padding:6px;color:#888;">{d}</th>' for d in days_header) + '</tr>'
+
+                    day = 1
+                    week_cells = ['<td></td>'] * first_weekday
+                    while day <= num_days:
+                        delta_val, label = day_map.get(day, (0, ''))
+                        max_delta = max((v for v, _ in day_map.values()), default=1) or 1
+                        intensity = min(int((delta_val / max_delta) * 200), 200) if delta_val > 0 else 0
+                        bg = f"rgb({255-intensity//2}, {255-intensity//4}, {255-intensity})" if delta_val > 0 else "#f5f5f5"
+                        text_color = "#1a1a2e" if intensity < 120 else "#fff"
+                        cell = f"""<td style="border:1px solid #e0e0e0;border-radius:6px;padding:8px 4px;text-align:center;background:{bg};min-width:40px;">
+                            <div style="font-weight:bold;color:#333;">{day}</div>
+                            <div style="color:{text_color};font-size:11px;font-weight:600;">{label}</div>
+                        </td>"""
+                        week_cells.append(cell)
+                        if len(week_cells) == 7:
+                            html += '<tr>' + ''.join(week_cells) + '</tr>'
+                            week_cells = []
+                        day += 1
+
+                    if week_cells:
+                        while len(week_cells) < 7:
+                            week_cells.append('<td></td>')
+                        html += '<tr>' + ''.join(week_cells) + '</tr>'
+
+                    html += '</table>'
+                    st.markdown(html, unsafe_allow_html=True)
+                    st.markdown("<br>", unsafe_allow_html=True)
+
+            st.divider()
+
+            # =====================================================
+            # FILTER RESTORANA — ispod kalendara
+            # =====================================================
+            col_f1, col_f2 = st.columns([3, 1])
+            with col_f1:
+                selected_restaurants = st.multiselect(
+                    "🏪 Odaberi restorane za prikaz:",
+                    options=all_restaurants,
+                    default=all_restaurants[:10] if len(all_restaurants) >= 10 else all_restaurants,
+                    help="Odaberi max 20 restorana za čitljiv graf"
+                )
+            with col_f2:
+                metric_choice = st.selectbox("📊 Metrika:", ["Rating_Count (ocjene)", "Est. narudžbe (×10)"])
+
+            if not selected_restaurants:
+                st.warning("Odaberi bar jedan restoran.")
+            else:
+                df_filtered = gs_history[gs_history['Name'].isin(selected_restaurants)].copy()
+
+                # =====================================================
+                # LINE CHART
+                # =====================================================
+                daily_avg = df_filtered.groupby(['date', 'Name'])['Rating_Count'].max().reset_index()
+                daily_avg.columns = ['Datum', 'Restoran', 'Ocjena_Count']
+                daily_avg['Datum'] = pd.to_datetime(daily_avg['Datum'])
+                daily_avg = daily_avg.sort_values('Datum')
+
+                if metric_choice == "Est. narudžbe (×10)":
+                    daily_avg['Vrijednost'] = daily_avg.groupby('Restoran')['Ocjena_Count'].diff().fillna(0) * 10
+                    y_label = "Procijenjene narudžbe"
+                    chart_title = "📦 Procijenjene dnevne narudžbe po restoranu"
+                else:
+                    daily_avg['Vrijednost'] = daily_avg['Ocjena_Count']
+                    y_label = "Ukupan broj ocjena"
+                    chart_title = "⭐ Kumulativni broj ocjena po restoranu"
+
+                st.subheader(chart_title)
+                fig_line = px.line(
+                    daily_avg, x='Datum', y='Vrijednost', color='Restoran',
+                    markers=True,
+                    labels={'Vrijednost': y_label, 'Datum': 'Datum'},
+                    height=500
+                )
+                fig_line.update_layout(
+                    legend=dict(orientation="v", yanchor="top", y=1, xanchor="left", x=1.01),
+                    hovermode="x unified"
+                )
+                st.plotly_chart(fig_line, use_container_width=True)
+
+                st.divider()
+
+                # =====================================================
+                # BAR CHART
+                # =====================================================
+                st.subheader("🏆 Top restorani — ukupni rast ocjena (cijeli period)")
+
+                pivot = gs_history[gs_history['Name'].isin(selected_restaurants)].copy()
+                pivot_agg = pivot.groupby('Name').agg(
+                    min_count=('Rating_Count', 'min'),
+                    max_count=('Rating_Count', 'max'),
+                ).reset_index()
+                pivot_agg['Rast_ocjena'] = pivot_agg['max_count'] - pivot_agg['min_count']
+                pivot_agg['Est_narudzbi'] = pivot_agg['Rast_ocjena'] * 10
+                pivot_agg = pivot_agg.sort_values('Est_narudzbi', ascending=False)
+
+                fig_bar = px.bar(
+                    pivot_agg, x='Name', y='Est_narudzbi',
+                    color='Est_narudzbi', color_continuous_scale='Viridis',
+                    labels={'Name': 'Restoran', 'Est_narudzbi': 'Est. narudžbe'},
+                    height=450, text='Est_narudzbi'
+                )
+                fig_bar.update_traces(texttemplate='%{text:,}', textposition='outside')
+                fig_bar.update_layout(showlegend=False, xaxis_tickangle=-35)
+                st.plotly_chart(fig_bar, use_container_width=True)
+
+                st.divider()
+
+                # =====================================================
+                # RAW DATA
+                # =====================================================
+                with st.expander("📋 Sirovi podaci iz Google Sheets"):
+                    st.dataframe(
+                        gs_history[gs_history['Name'].isin(selected_restaurants)]
+                        .sort_values(['Name', 'timestamp'], ascending=[True, False]),
+                        use_container_width=True,
+                        hide_index=True
+                    )
+                    csv_export = gs_history.to_csv(index=False).encode('utf-8')
+                    st.download_button(
+                        "⬇️ Export sve podatke kao CSV",
+                        csv_export,
+                        f"wolt_history_{city_name}_{datetime.date.today()}.csv",
+                        "text/csv"
+                    )
+
+# --- TAB 2: TRAFFIC ---
+with tab2:
+    st.title("📈 Traffic")
 
     if df_raw.empty:
         st.error("❌ Nema podataka za prikaz.")
@@ -650,297 +846,197 @@ with tab3:
                 csv_data = full_h.to_csv(index=False).encode('utf-8')
                 st.download_button("⬇️ Preuzmi radar_history.csv", csv_data, "radar_history.csv", "text/csv")
 
-# --- TAB 4: RATING HISTORY (GOOGLE SHEETS) ---
-with tab4:
-    st.title("📊 Rating History — Google Sheets")
+# --- TAB 3: TRAFFIC TRACKER ---
+with tab3:
+    st.title("📉 Traffic Tracker")
 
-    if not gsheets_configured():
-        st.error("❌ Google Sheets nije konfigurisan.")
-        st.markdown("""
-        ### Kako podesiti Google Sheets integraciju:
-
-        **1. Kreiraj Google Service Account**
-        - Idi na [Google Cloud Console](https://console.cloud.google.com/)
-        - Kreiraj novi projekat (ili koristi postojeći)
-        - Omogući **Google Sheets API** i **Google Drive API**
-        - Idi na *IAM & Admin → Service Accounts → Create*
-        - Preuzmi JSON ključ (Download JSON)
-
-        **2. Kreiraj Google Sheet**
-        - Napravi novi spreadsheet na [sheets.google.com](https://sheets.google.com)
-        - Podijeli sheet sa email adresom service accounta (kao Editor)
-        - Kopiraj Sheet ID iz URL-a (dio između `/d/` i `/edit`)
-
-        **3. Dodaj secrets u `.streamlit/secrets.toml`**
-        ```toml
-        [gcp_service_account]
-        type = "service_account"
-        project_id = "tvoj-project-id"
-        private_key_id = "abc123..."
-        private_key = "-----BEGIN RSA PRIVATE KEY-----\\nMIIE...\\n-----END RSA PRIVATE KEY-----\\n"
-        client_email = "ime@project.iam.gserviceaccount.com"
-        client_id = "123456789"
-        auth_uri = "https://accounts.google.com/o/oauth2/auth"
-        token_uri = "https://oauth2.googleapis.com/token"
-
-        [google_sheets]
-        spreadsheet_id = "1AbCdEfGhIjKlMnOpQrStUvWxYz"
-        ```
-
-        **4. Restartuj app** — podaci će se automatski snimati svaki sat.
-        """)
+    if df_raw.empty:
+        st.error("❌ Nema podataka za prikaz.")
     else:
-        # Dugmad za snimanje
-        col_gs1, col_gs2, col_gs3 = st.columns([2, 1, 1])
-        with col_gs2:
-            if st.button("💾 Snimi snapshot sada", use_container_width=True):
-                if not df_raw.empty:
-                    with st.spinner("Snimam u Google Sheets..."):
-                        ok, msg = save_to_gsheets(df_raw, city_name)
-                        if ok:
-                            st.success(msg)
-                            load_from_gsheets.clear()
-                        else:
-                            st.error(msg)
-                else:
-                    st.warning("Nema podataka za snimanje.")
+        h = load_history(city_name)
+        unique_timestamps = sorted(h['timestamp'].unique()) if not h.empty else []
+        num_scans = len(unique_timestamps)
 
-        with col_gs3:
-            if st.button("🌍 Snimi sve gradove", use_container_width=True):
-                progress = st.progress(0, text="Učitavam gradove...")
-                results = []
-                for i, (cname, cinfo) in enumerate(CITIES.items()):
-                    progress.progress((i) / len(CITIES), text=f"Skidam {cname}...")
-                    try:
-                        df_city = fetch_wolt_data(cinfo["coords"][0], cinfo["coords"][1], cinfo["slug"])
-                        if not df_city.empty:
-                            ok, msg = save_to_gsheets(df_city, cname)
-                            results.append(f"{'✅' if ok else '❌'} {cname}: {msg}")
-                        else:
-                            results.append(f"⚠️ {cname}: nema podataka")
-                    except Exception as e:
-                        results.append(f"❌ {cname}: {e}")
-                progress.progress(1.0, text="Gotovo!")
-                load_from_gsheets.clear()
-                for r in results:
-                    st.write(r)
+        if num_scans <= 1:
+            ts_label = unique_timestamps[0].strftime('%d.%m.%Y u %H:%M:%S') if num_scans == 1 else "upravo sada"
+            st.info(f"📋 **Ovo je prvi scan** — {ts_label}.")
 
-        if st.button("🔄 Osvježi historiju", use_container_width=True):
-            load_from_gsheets.clear()
-            st.rerun()
+            display_df = df_raw[["Name", "Rating_Count", "Rating", "Online", "Cuisine_Details"]].copy()
+            display_df = display_df.rename(columns={
+                "Name": "Restoran", "Rating_Count": "Broj ocena",
+                "Rating": "Ocena", "Online": "Status", "Cuisine_Details": "Kuhinja"
+            })
+            display_df["Status"] = display_df["Status"].apply(lambda x: "🟢 Otvoren" if x else "🔴 Zatvoren")
+            display_df = display_df.sort_values("Broj ocena", ascending=False)
+            st.dataframe(display_df, use_container_width=True, hide_index=True)
 
-        # Filter po gradu
-        with st.spinner("Učitavam historiju iz Google Sheets..."):
-            gs_history_all = load_from_gsheets()
-
-        if gs_history_all.empty:
-            gs_history = pd.DataFrame()
         else:
-            available_cities = sorted(gs_history_all['city'].unique().tolist()) if 'city' in gs_history_all.columns else [city_name]
-            selected_city_history = st.selectbox("🏙️ Grad:", available_cities, index=available_cities.index(city_name) if city_name in available_cities else 0)
-            gs_history = gs_history_all[gs_history_all['city'] == selected_city_history].copy()
+            prev_ts = unique_timestamps[-1]
+            curr_ts = datetime.datetime.now(local_tz)
 
-        if gs_history.empty:
-            st.info("📭 Nema podataka u Google Sheets za ovaj grad. Pritisni 'Snimi snapshot sada' da počneš prikupljati podatke.")
-        else:
-            # Agregacija po danu
-            gs_history['date'] = gs_history['timestamp'].dt.date
+            df_prev = h[h['timestamp'] == prev_ts][["Name", "Rating_Count"]].copy()
+            df_prev = df_prev.rename(columns={"Rating_Count": "Ocene_pre"})
 
-            # --- Metrički pregled ---
-            first_date = gs_history['date'].min()
-            last_date = gs_history['date'].max()
-            unique_days = gs_history['date'].nunique()
-            total_records = len(gs_history)
+            df_curr = df_raw[["Name", "Rating_Count", "Rating", "Online", "Cuisine_Details"]].copy()
+            df_curr = df_curr.rename(columns={"Rating_Count": "Ocene_sada"})
 
-            cm1, cm2, cm3, cm4 = st.columns(4)
-            cm1.metric("📅 Praćenje od", str(first_date))
-            cm2.metric("📅 Posljednji dan", str(last_date))
-            cm3.metric("📆 Broj dana", unique_days)
-            cm4.metric("📝 Ukupno zapisa", total_records)
+            merged = pd.merge(df_curr, df_prev, on="Name", how="left")
+            merged["Ocene_pre"] = merged["Ocene_pre"].fillna(0).astype(int)
+            merged["Ocene_sada"] = merged["Ocene_sada"].fillna(0).astype(int)
+            merged["Δ Ocena"] = merged["Ocene_sada"] - merged["Ocene_pre"]
+            merged["Est. narudžbi"] = merged["Δ Ocena"] * 10
+
+            new_restaurants = merged[merged["Ocene_pre"] == 0]["Name"].tolist()
+            total_new_orders = int(merged[merged["Δ Ocena"] > 0]["Est. narudžbi"].sum())
+            active_count = int((merged["Δ Ocena"] > 0).sum())
+
+            col1, col2, col3, col4 = st.columns(4)
+            col1.metric("🕐 Prethodni scan", prev_ts.strftime('%d.%m. %H:%M'))
+            col2.metric("🕐 Trenutni scan", curr_ts.strftime('%d.%m. %H:%M'))
+            col3.metric("📦 Est. novih narudžbi", total_new_orders)
+            col4.metric("🔥 Aktivnih restorana", active_count)
 
             st.divider()
 
-            # --- Filter restorana ---
-            if 'Name' not in gs_history.columns:
-                st.error(f"❌ Sheet nema ispravne kolone. Pronađene kolone: {list(gs_history.columns)}")
-                st.stop()
-            all_restaurants = sorted(gs_history['Name'].unique().tolist())
-            
-            col_f1, col_f2 = st.columns([3, 1])
-            with col_f1:
-                selected_restaurants = st.multiselect(
-                    "🏪 Odaberi restorane za prikaz:",
-                    options=all_restaurants,
-                    default=all_restaurants[:10] if len(all_restaurants) >= 10 else all_restaurants,
-                    help="Odaberi max 20 restorana za čitljiv graf"
+            display = merged[[
+                "Name", "Online", "Cuisine_Details",
+                "Ocene_pre", "Ocene_sada", "Δ Ocena", "Est. narudžbi"
+            ]].copy()
+            display = display.rename(columns={
+                "Name": "Restoran", "Online": "Status", "Cuisine_Details": "Kuhinja",
+                "Ocene_pre": f"Ocene_prije ({prev_ts.strftime('%d.%m %H:%M')})",
+                "Ocene_sada": f"Ocene_sada ({curr_ts.strftime('%d.%m %H:%M')})",
+            })
+            display["Status"] = display["Status"].apply(lambda x: "🟢" if x else "🔴")
+
+            st.dataframe(
+                display.sort_values("Δ Ocena", ascending=False),
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Δ Ocena": st.column_config.NumberColumn("Δ Ocena", format="%+d"),
+                    "Est. narudžbi": st.column_config.NumberColumn("Est. narudžbi", format="%+d"),
+                }
+            )
+
+            if new_restaurants:
+                st.info(
+                    f"🆕 **Novi restorani od poslednjeg scana:** {', '.join(new_restaurants[:10])}" +
+                    (f" i još {len(new_restaurants)-10}" if len(new_restaurants) > 10 else "")
                 )
-            with col_f2:
-                metric_choice = st.selectbox("📊 Metrika:", ["Rating_Count (ocjene)", "Est. narudžbe (×10)"])
 
-            if not selected_restaurants:
-                st.warning("Odaberi bar jedan restoran.")
-            else:
-                # Filter podataka
-                df_filtered = gs_history[gs_history['Name'].isin(selected_restaurants)].copy()
+            st.divider()
+            if st.button("💾 Preuzmi istoriju kao CSV", key="csv_tab3"):
+                full_h = load_history(city_name)
+                csv_data = full_h.to_csv(index=False).encode('utf-8')
+                st.download_button("⬇️ Preuzmi radar_history.csv", csv_data, "radar_history.csv", "text/csv")
 
-                # Dnevni prosjek po restoranu
-                daily_avg = df_filtered.groupby(['date', 'Name'])['Rating_Count'].mean().reset_index()
-                daily_avg.columns = ['Datum', 'Restoran', 'Ocjena_Count']
-                daily_avg['Datum'] = pd.to_datetime(daily_avg['Datum'])
-                daily_avg = daily_avg.sort_values('Datum')
+# --- TAB 4: MARKET ANALYSIS ---
+with tab4:
+    st.title("🔍 Market Analysis")
+    if df_main.empty:
+        st.error("❌ Podaci nisu učitani.")
+    else:
+        flat_cats = [item for sublist in df_main['Cuisine_Raw'] for item in sublist if item]
+        unique_cats = sorted(list(set(flat_cats)))
 
-                if metric_choice == "Est. narudžbe (×10)":
-                    # Dnevni delta (rast) = est. narudžbe
-                    daily_avg['Vrijednost'] = daily_avg.groupby('Restoran')['Ocjena_Count'].diff().fillna(0) * 10
-                    y_label = "Procijenjene narudžbe"
-                    chart_title = "📦 Procijenjene dnevne narudžbe po restoranu"
-                else:
-                    daily_avg['Vrijednost'] = daily_avg['Ocjena_Count']
-                    y_label = "Ukupan broj ocjena"
-                    chart_title = "⭐ Kumulativni broj ocjena po restoranu"
+        if not unique_cats:
+            st.warning("⚠️ Nema podataka o kuhinjama.")
+            st.dataframe(df_main[["Name", "Cuisine_Raw", "Cuisine_Details"]].head(10), use_container_width=True)
+        else:
+            selection = st.selectbox("🍽️ Filter by Cuisine:", ["All"] + unique_cats)
 
-                # --- LINE CHART: Rast po danima ---
-                st.subheader(chart_title)
-                fig_line = px.line(
-                    daily_avg,
-                    x='Datum',
-                    y='Vrijednost',
-                    color='Restoran',
-                    markers=True,
-                    labels={'Vrijednost': y_label, 'Datum': 'Datum'},
-                    height=500
-                )
-                fig_line.update_layout(
-                    legend=dict(orientation="v", yanchor="top", y=1, xanchor="left", x=1.01),
-                    hovermode="x unified"
-                )
-                st.plotly_chart(fig_line, use_container_width=True)
+            df_f = df_main
+            if selection != "All":
+                df_f = df_main[df_main['Cuisine_Raw'].apply(
+                    lambda x: selection in x if isinstance(x, list) else False
+                )]
 
-                st.divider()
+            col1, col2, col3 = st.columns(3)
+            col1.metric("🏪 Ukupno restorana", len(df_f))
+            col2.metric("🟢 Otvoreni", len(df_f[df_f['Online'] == True]))
+            col3.metric("🔴 Zatvoreni", len(df_f[df_f['Online'] == False]))
 
-                # --- BAR CHART: Top restorani po ukupnom rastu ---
-                st.subheader("🏆 Top restorani — ukupni rast ocjena (cijeli period)")
-                
-                pivot = gs_history[gs_history['Name'].isin(selected_restaurants)].copy()
-                pivot_agg = pivot.groupby('Name').agg(
-                    min_count=('Rating_Count', 'min'),
-                    max_count=('Rating_Count', 'max'),
-                ).reset_index()
-                pivot_agg['Rast_ocjena'] = pivot_agg['max_count'] - pivot_agg['min_count']
-                pivot_agg['Est_narudzbi'] = pivot_agg['Rast_ocjena'] * 10
-                pivot_agg = pivot_agg.sort_values('Est_narudzbi', ascending=False)
+            map2_hash = df_hash(df_f)
+            m2 = folium.Map(location=[st.session_state.lat, st.session_state.lon], zoom_start=14)
+            for _, row in df_f.iterrows():
+                color = "green" if row['Online'] else "red"
+                folium.CircleMarker(
+                    [row['Lat'], row['Lon']], radius=8, color=color, fill=True,
+                    tooltip=f"{row['Name']} | {row['Cuisine_Details']}"
+                ).add_to(m2)
+            st_folium(m2, width="100%", height=500, key=f"m2_{map2_hash}_{selection}", returned_objects=[])
 
-                fig_bar = px.bar(
-                    pivot_agg,
-                    x='Name',
-                    y='Est_narudzbi',
-                    color='Est_narudzbi',
-                    color_continuous_scale='Viridis',
-                    labels={'Name': 'Restoran', 'Est_narudzbi': 'Est. narudžbe'},
-                    height=450,
-                    text='Est_narudzbi'
-                )
-                fig_bar.update_traces(texttemplate='%{text:,}', textposition='outside')
-                fig_bar.update_layout(showlegend=False, xaxis_tickangle=-35)
-                st.plotly_chart(fig_bar, use_container_width=True)
+            st.subheader(f"📋 Restorani ({len(df_f)})")
+            st.dataframe(
+                df_f[["Name", "Status", "Rating", "Rating_Count", "Cuisine_Details", "Wolt Link"]],
+                use_container_width=True,
+                hide_index=True,
+                column_config={"Wolt Link": st.column_config.LinkColumn("Link")}
+            )
 
-                st.divider()
+            if selection == "All" and flat_cats:
+                st.subheader("📊 Distribucija kuhinja")
+                from collections import Counter
+                cuisine_counts = Counter(flat_cats)
+                cuisine_df = pd.DataFrame(
+                    cuisine_counts.items(), columns=["Kuhinja", "Broj restorana"]
+                ).sort_values("Broj restorana", ascending=False).head(20)
+                fig = px.bar(cuisine_df, x="Kuhinja", y="Broj restorana",
+                             color="Broj restorana", color_continuous_scale="Blues")
+                fig.update_layout(showlegend=False, height=400)
+                st.plotly_chart(fig, use_container_width=True)
 
-                # --- KALENDAR: Delta ocjena po danu ---
-                st.subheader("🗓️ Kalendar — nove ocjene po danu")
-
-                df_cal = gs_history.copy()
-                df_cal['date'] = df_cal['timestamp'].dt.date
-
-                # Za svaki restoran uzmi max i min Rating_Count po danu, delta = rast tog dana
-                daily_max = df_cal.groupby(['date', 'Name'])['Rating_Count'].max()
-                daily_min = df_cal.groupby(['date', 'Name'])['Rating_Count'].min()
-                daily_delta = (daily_max - daily_min).reset_index()
-                daily_delta.columns = ['date', 'Name', 'delta']
-
-                # Ukupni delta po danu (suma svih restorana)
-                cal_data = daily_delta.groupby('date')['delta'].sum().reset_index()
-                cal_data['date'] = pd.to_datetime(cal_data['date'])
-                cal_data = cal_data.sort_values('date')
-
-                if cal_data.empty or cal_data['delta'].sum() == 0:
-                    st.info("Nema dovoljno podataka za kalendar — potrebno je bar 2 snimka u istom danu.")
-                else:
-                    # Kalendarski prikaz po mjesecima
-                    cal_data['year'] = cal_data['date'].dt.year
-                    cal_data['month'] = cal_data['date'].dt.month
-                    cal_data['day'] = cal_data['date'].dt.day
-                    cal_data['weekday'] = cal_data['date'].dt.weekday  # 0=Mon
-                    cal_data['month_name'] = cal_data['date'].dt.strftime('%B %Y')
-                    cal_data['label'] = cal_data['delta'].apply(lambda x: f"+{int(x):,}" if x > 0 else "0")
-
-                    for month_name, month_df in cal_data.groupby('month_name', sort=False):
-                        st.markdown(f"**{month_name}**")
-
-                        # Napravi mrežu dana
-                        import calendar
-                        year = month_df['year'].iloc[0]
-                        month = month_df['month'].iloc[0]
-                        _, num_days = calendar.monthrange(year, month)
-                        first_weekday = calendar.monthrange(year, month)[0]
-
-                        # Dict datum -> (delta, label)
-                        day_map = {row['day']: (row['delta'], row['label']) for _, row in month_df.iterrows()}
-
-                        # Nacrtaj kalendar kao HTML tabelu
-                        days_header = ['Pon', 'Uto', 'Sri', 'Čet', 'Pet', 'Sub', 'Ned']
-                        html = '<table style="border-collapse:collapse;width:100%;font-family:sans-serif;font-size:13px;">'
-                        html += '<tr>' + ''.join(f'<th style="text-align:center;padding:6px;color:#888;">{d}</th>' for d in days_header) + '</tr>'
-
-                        day = 1
-                        week_cells = ['<td></td>'] * first_weekday
-                        while day <= num_days:
-                            delta_val, label = day_map.get(day, (0, ''))
-                            # Boja ovisno o veličini delte
-                            max_delta = max((v for v, _ in day_map.values()), default=1) or 1
-                            intensity = min(int((delta_val / max_delta) * 200), 200) if delta_val > 0 else 0
-                            bg = f"rgb({255-intensity//2}, {255-intensity//4}, {255-intensity})" if delta_val > 0 else "#f5f5f5"
-                            text_color = "#1a1a2e" if intensity < 120 else "#fff"
-                            cell = f"""<td style="border:1px solid #e0e0e0;border-radius:6px;padding:8px 4px;text-align:center;background:{bg};min-width:40px;">
-                                <div style="font-weight:bold;color:#333;">{day}</div>
-                                <div style="color:{text_color};font-size:11px;font-weight:600;">{label}</div>
-                            </td>"""
-                            week_cells.append(cell)
-                            if len(week_cells) == 7:
-                                html += '<tr>' + ''.join(week_cells) + '</tr>'
-                                week_cells = []
-                            day += 1
-
-                        if week_cells:
-                            while len(week_cells) < 7:
-                                week_cells.append('<td></td>')
-                            html += '<tr>' + ''.join(week_cells) + '</tr>'
-
-                        html += '</table>'
-                        st.markdown(html, unsafe_allow_html=True)
-                        st.markdown("<br>", unsafe_allow_html=True)
-
-                st.divider()
-
-                # --- RAW DATA ---
-                with st.expander("📋 Sirovi podaci iz Google Sheets"):
-                    st.dataframe(
-                        gs_history[gs_history['Name'].isin(selected_restaurants)]
-                        .sort_values(['Name', 'timestamp'], ascending=[True, False]),
-                        use_container_width=True,
-                        hide_index=True
-                    )
-
-                    csv_export = gs_history.to_csv(index=False).encode('utf-8')
-                    st.download_button(
-                        "⬇️ Export sve podatke kao CSV",
-                        csv_export,
-                        f"wolt_history_{city_name}_{datetime.date.today()}.csv",
-                        "text/csv"
-                    )
-
-# --- TAB 5: SERVICE CLOUD ---
+# --- TAB 5: RADAR ---
 with tab5:
+    st.title("🟢 Radar")
+    if df_main.empty:
+        st.error("❌ Podaci nisu učitani.")
+        if 'raw_api_debug' in st.session_state:
+            st.json(st.session_state['raw_api_debug'])
+    else:
+        col_m1, col_m2 = st.columns(2)
+        col_m1.metric("Open 🟢", len(df_main[df_main['Online'] == True]))
+        col_m2.metric("Closed 🔴", len(df_main[df_main['Online'] == False]))
+
+        current_hash = df_hash(df_main)
+        render_key = f"m1_{current_hash}_{st.session_state.lat:.4f}_{st.session_state.lon:.4f}"
+
+        m1 = folium.Map(location=[st.session_state.lat, st.session_state.lon], zoom_start=14)
+        folium.Marker(
+            [st.session_state.lat, st.session_state.lon],
+            icon=folium.Icon(color='blue', icon='home')
+        ).add_to(m1)
+        for _, row in df_main.iterrows():
+            color = "green" if row['Online'] else "red"
+            folium.CircleMarker(
+                [row['Lat'], row['Lon']], radius=7, color=color, fill=True,
+                tooltip=f"{row['Name']} | {row['Status']}"
+            ).add_to(m1)
+
+        map_resp = st_folium(m1, width="100%", height=500, key=render_key, returned_objects=["last_clicked"])
+        if map_resp and map_resp.get("last_clicked"):
+            st.session_state.lat = map_resp["last_clicked"]["lat"]
+            st.session_state.lon = map_resp["last_clicked"]["lng"]
+            st.cache_data.clear()
+            st.rerun()
+
+        st.dataframe(
+            df_main[["Name", "Status", "Rating", "Rating_Count", "Cuisine_Details", "Wolt Link"]],
+            use_container_width=True,
+            hide_index=True,
+            column_config={"Wolt Link": st.column_config.LinkColumn("Link")}
+        )
+
+        with st.expander("🗂️ Debug — API info"):
+            if 'debug_sections' in st.session_state:
+                st.json(st.session_state['debug_sections'])
+            if 'raw_api_debug' in st.session_state:
+                st.json(st.session_state['raw_api_debug'])
+
+# --- TAB 6: SERVICE CLOUD ---
+with tab6:
+    st.title("☁️ Service Cloud")
     m4 = folium.Map(location=[st.session_state.lat, st.session_state.lon], zoom_start=13, tiles="cartodbpositron")
     df_a = df_main[df_main['Online'] == True] if not df_main.empty else pd.DataFrame()
 
