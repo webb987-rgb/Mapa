@@ -201,12 +201,13 @@ def fetch_venue_list(lat, lon, city_slug):
     params = {"lat": float(lat), "lon": float(lon)}
 
     try:
-        r = requests.get(url, params=params, headers=WOLT_HEADERS, impersonate="chrome120", timeout=15)
+        r = requests.get(url, params=params, headers=WOLT_HEADERS, impersonate="chrome124", timeout=15)
 
         st.session_state['raw_api_debug'] = {
             "Endpoint": url,
             "HTTP Status": r.status_code,
-            "Prvih 300 karaktera": r.text[:300]
+            "Prvih 300 karaktera": r.text[:300],
+            "Response Headers": dict(r.headers),
         }
 
         if r.status_code != 200:
@@ -315,7 +316,7 @@ def fetch_wolt_data(lat, lon, city_slug):
     payload = {"lat": float(lat), "lon": float(lon)}
 
     try:
-        r = requests.post(url, json=payload, headers=WOLT_HEADERS, impersonate="chrome120", timeout=15)
+        r = requests.post(url, json=payload, headers=WOLT_HEADERS, impersonate="chrome124", timeout=15)
 
         if r.status_code != 200:
             return empty_df
