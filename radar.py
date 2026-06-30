@@ -91,9 +91,6 @@ WOLT_HEADERS = {
     "sec-fetch-mode": "cors",
     "sec-fetch-site": "same-site",
     "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36",
-    "w-wolt-session-id": "322cf981-a30b-460e-a2ad-9e2f2367718f",
-    "x-wolt-web-clientid": "6020ea5f-e8b8-428c-9dac-990e6762f56f",
-    "cookie": "ravelinDeviceId=rjs-e2022c3e-07d3-4c6a-910d-973b4273ee0d; rskxRunCookie=0; rCookie=df93ypr9eeqeubs3uxtx1emfgklyxr; cwc-consents={%22analytics%22:true%2C%22functional%22:true%2C%22interaction%22:{%22bundle%22:%22allow%22}%2C%22marketing%22:true%2C%22updatedAt%22:{%22bundle%22:%222025-09-12T08:23:42.245Z%22}%2C%22versions%22:{%22bundle%22:[%226f6e0a18-e3dd-43e8-9e57-7e09f6d90239%22%2C%224900fd93-1d29-4f54-b165-82d98b47c9ce%22]}}; _ga=GA1.1.827517620.1757665421; __woltUid=6020ea5f-e8b8-428c-9dac-990e6762f56f; _yjsu_yjad=1757665423.89251f19-e392-4f9e-94be-d7cff326a0c8; telemetryDeviceId=6020ea5f-e8b8-428c-9dac-990e6762f56f; cwc-language=en; telemetryDeviceId_=6020ea5f-e8b8-428c-9dac-990e6762f56f; __woltUid_=6020ea5f-e8b8-428c-9dac-990e6762f56f; _gcl_au=1.1.1458055390.1773648206.1177876118.1774621016.1774621016; AwinChannelCookie=other; lantern=939b559d-7f23-4458-a2b1-d2601b19309f; telemetrySessionId=322cf981-a30b-460e-a2ad-9e2f2367718f; telemetrySessionId_=322cf981-a30b-460e-a2ad-9e2f2367718f; ravelinSessionId=rjs-e2022c3e-07d3-4c6a-910d-973b4273ee0d:06d1f5f9-6e7a-4264-a4f9-99b8cd114c0a; _gcl_gs=2.1.k1$i1779963260$u76688403; _gcl_aw=GCL.1779963265.Cj0KCQjwz9_QBhD_ARIsADnSCfDeqxKXB1Xh9RUGVRwf7mnE4LxtVzbthvyJMJSSSM68xyX2uMVi284aAqGQEALw_wcB; lastRskxRun=1780321818344; __woltAnalyticsId=322cf981-a30b-460e-a2ad-9e2f2367718f; _clck=16dc31a%5E2%5Eg6l%5E1%5E2081; __woltAnalyticsId_=322cf981-a30b-460e-a2ad-9e2f2367718f; _uetsid=14770a105f4c11f1aeea8d5d251cb0b5; _uetvid=cb244d408fb111f09fee47d7a0c43d54; _clsk=1u3utsu%5E1780491736196%5E6%5E1%5Er.clarity.ms%2Fcollect; _ga_CP7Z2F7NFM=GS2.1.s1780491578$o207$g1$t1780491739$j42$l0$h0$dOez4uWLiHxGYv2sVVpAgv3oKDuyOb-XwGg"
 }
 
 # --- 4. GOOGLE SHEETS HELPERS ---
@@ -213,6 +210,11 @@ def fetch_venue_list(lat, lon, city_slug):
         }
 
         if r.status_code != 200:
+            # Fallback: ako smo rate-limited (429) ili druga greska, vrati posljednje dobre podatke ako postoje
+            last_good_key = f"last_good_venues_{city_slug}"
+            if last_good_key in st.session_state:
+                st.session_state['raw_api_debug']["Napomena"] = f"HTTP {r.status_code} — prikazujem poslednje keširane podatke"
+                return st.session_state[last_good_key]
             return empty_df
 
         data = r.json()
@@ -290,6 +292,7 @@ def fetch_venue_list(lat, lon, city_slug):
 
         if venue_map:
             df_result = pd.DataFrame(list(venue_map.values())).drop_duplicates(subset=['Name'])
+            st.session_state[f"last_good_venues_{city_slug}"] = df_result
             return df_result
 
     except Exception as e:
